@@ -420,8 +420,8 @@ class MasterController:
         show) gets backed off and the spot is avoided for a while. Judged over a window: how
         far the sticks asked it to go against how far it actually went."""
         asked = float(np.hypot(cmd.vx, cmd.vy)) if cmd.mode == "fly" else 0.0
-        if r.grounded or r.mode == TAKEOFF:
-            r.win = None
+        if r.grounded or r.mode not in (SURVEY, ENTER, EXPLORE, INVESTIGATE, RTB):
+            r.win = None  # holding, relaying, charging: not trying to get anywhere
             return
         if r.win is None:
             r.win = [t, r.pos.copy(), 0.0]
