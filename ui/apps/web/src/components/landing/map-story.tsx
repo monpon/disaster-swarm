@@ -4,7 +4,7 @@ import type { ComponentType } from "react";
 
 import { PointCloud } from "./point-cloud";
 import { coverage, type Story } from "./story";
-import { range, useScrollProgress } from "./use-scroll-progress";
+import { range, useAnimatedValue, useScrollProgress } from "./use-scroll-progress";
 
 const STEPS = [
   { title: "Each drone takes a room.", detail: "Four small drones fly in and split up." },
@@ -23,17 +23,23 @@ const FINDINGS: { key: keyof Story["events"]; title: string; where: string; colo
 const FEEDS = ["/assets/f1.png", "/assets/f2.png", "/assets/f3.png", "/assets/f4.png"];
 const ROUTE = "365.9,474.1 405.4,451.3 481.1,403.8 517.3,367.7 431.7,322.1 379.1,352.5 303.4,354.4";
 
-/** Pinned scene: the console builds the map while its panes open step by step. */
+/** How far into the search each step plays, as a share of the swarm's run. */
+const STEP_TARGET = [0.08, 0.62, 1, 1];
+
+/**
+ * Pinned scene: scroll picks the step, and within each step the map and the
+ * console panes animate on their own.
+ */
 export function MapStory({ story }: { story: Story | null }) {
   const { ref, progress } = useScrollProgress<HTMLElement>();
   const end = story?.swarmEnd ?? 0.37;
-  const t = range(progress, 0.02, 0.7) * end;
-  const step = Math.min(3, Math.floor(progress * 4));
+  const step = Math.min(3, Math.floor(range(progress, 0, 0.92) * 4));
+  const t = useAnimatedValue(STEP_TARGET[step]! * end, 1.6);
   const pct = story ? Math.round(coverage(story, "swarm", t) * 100) : 0;
-  const routeDraw = range(progress, 0.78, 0.92);
+  const routeDraw = useAnimatedValue(step >= 3 ? 1 : 0, 2.2);
 
   return (
-    <section id="how" ref={ref} className="relative h-[420vh]">
+    <section id="how" ref={ref} className="relative h-[340vh]">
       <div className="sticky top-[68px] flex min-h-[calc(100svh-68px)] flex-col items-center justify-center gap-10 px-4 py-12 md:flex-row md:gap-12 md:px-16">
         <div className="flex w-full max-w-[380px] shrink-0 flex-col gap-7">
           <h2 className="text-[36px] leading-[1.05] font-bold tracking-[-0.035em] md:text-[48px]">Together, they build one map.</h2>

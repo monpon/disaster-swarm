@@ -1,4 +1,4 @@
-# Swarm console (UI)
+# Missions console (UI)
 
 Web console for the disaster swarm: incident setup, the live 3D map with drone feeds and findings, fleet configuration, settings, and a landing page. Built from the "v2 — orange" Paper designs.
 
@@ -44,7 +44,6 @@ python3 gen2.py ../../public/assets      # cloud.png, f1-f4.png
 python3 plan.py ../../public/assets      # plan.png
 python3 streets.py ../../public/assets   # streets.png
 python3 story.py ../../public/assets     # story-points.bin, story.json (landing page)
-python3 people.py ../../public/assets    # person-*.png (vitals section)
 ```
 
 `story.py` simulates two searches of the same house along hand-drawn flight paths, four drones splitting the rooms and one drone visiting every room in turn, and records when each point of the cloud is first seen. The landing page draws the cloud on a canvas and scrubs that timeline with scroll. It is an illustration of the idea, not a measured result, and the page labels it that way.
