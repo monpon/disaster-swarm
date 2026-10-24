@@ -29,7 +29,7 @@ FREE_WEIGHT = 0.3  # carving counts less than a surface hit
 MIN_W = 0.2  # a voxel needs this much weight to count as observed
 W_CAP = 64.0
 CHUNK = 32
-CHUNKS_PER_CYCLE = 8
+MESH_BUDGET_S = 0.2  # GPU time per worker cycle spent re-meshing dirty chunks
 FILTER_SIGMA = 1.2  # voxels: Gaussian smoothing of the distance field before meshing
 FILTER_PAD = 3
 BLUR_WEIGHT_SAT = 0.0  # >0: voxels with more evidence count more in the blur (saturating here)
@@ -44,10 +44,10 @@ class Surface:
         self.backend = "off"
         try:
             import torch
-            from skimage import measure
+            from .gpumc import GpuMarchingCubes
         except ImportError:
             return
-        self.torch, self.measure = torch, measure
+        self.torch = torch
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.backend = "cuda" if self.device.type == "cuda" else "torch-cpu"
         self.dims = tuple(int(np.ceil(s / VOXEL)) for s in site_shape)
@@ -59,11 +59,12 @@ class Surface:
         self.col = torch.zeros((n, 3), dtype=torch.uint8, device=self.device)
         self.wc = torch.zeros(n, dtype=torch.float16, device=self.device)
         self.offs = torch.arange(-MU, BEHIND + 1e-6, BAND_STEP, device=self.device)  # band offsets (m): front is negative
-        self.dirty: set[int] = set()
+        self.dirty: dict[int, None] = {}  # chunks to re-mesh, oldest first (every chunk gets its turn)
         self.chunks: dict[int, dict] = {}  # chunk id -> {"ver", "v", "n", "c", "f"}
         self.tris = 0
         self.last_ms = 0.0
         self.frames_done = 0
+        self.mc = GpuMarchingCubes(torch, self.device)
         self.q: queue.Queue = queue.Queue(maxsize=MAX_QUEUE)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="surface", daemon=True)
@@ -165,13 +166,16 @@ class Surface:
         j = (uniq // nz) % ny
         k = uniq % nz
         cid = ((i // CHUNK) * self.ncy + (j // CHUNK)) * self.ncz + (k // CHUNK)
-        self.dirty.update(torch.unique(cid).cpu().tolist())
+        for c in torch.unique(cid).cpu().tolist():
+            self.dirty.setdefault(c, None)  # keeps its place in line if already waiting
         self.frames_done += len(batch)
 
     # ---------------------------------------------------------------- meshing
     def _mesh_dirty(self) -> None:
-        for cid in sorted(self.dirty)[:CHUNKS_PER_CYCLE]:
-            self.dirty.discard(cid)
+        t0 = time.perf_counter()
+        while self.dirty and time.perf_counter() - t0 < MESH_BUDGET_S:
+            cid = next(iter(self.dirty))
+            del self.dirty[cid]
             self._mesh_chunk(cid)
         self.tris = sum(len(c["f"]) // 3 for c in self.chunks.values())
 
@@ -197,86 +201,76 @@ class Surface:
         num, den = blur(vol * m), blur(m)
         return torch.where((den > 0.25) & obs, num / den.clamp_min(1e-6), vol)
 
-    def _sub(self, arr, i0, j0, k0, n):
-        nx, ny, nz = self.dims
-        return arr.view(nx, ny, nz, *arr.shape[1:])[i0:i0 + n[0], j0:j0 + n[1], k0:k0 + n[2]]
-
     def _mesh_chunk(self, cid: int) -> None:
+        torch = self.torch
         nx, ny, nz = self.dims
         ck, r = cid % self.ncz, cid // self.ncz
         cj, ci = r % self.ncy, r // self.ncy
         i0, j0, k0 = ci * CHUNK, cj * CHUNK, ck * CHUNK
         n = (min(CHUNK + 1, nx - i0), min(CHUNK + 1, ny - j0), min(CHUNK + 1, nz - k0))  # +1: shared border
-        pad = FILTER_PAD  # context around the chunk so smoothing is seamless across chunk borders
-        lo = (max(i0 - pad, 0), max(j0 - pad, 0), max(k0 - pad, 0))
-        hi = (min(i0 + n[0] + pad, nx), min(j0 + n[1] + pad, ny), min(k0 + n[2] + pad, nz))
-        big = (slice(lo[0], hi[0]), slice(lo[1], hi[1]), slice(lo[2], hi[2]))
-        tv = self.tsdf.view(nx, ny, nz)[big].float()
-        wv = self.w.view(nx, ny, nz)[big].float()
-        obs_t = wv >= MIN_W
-        vol_t = self._smooth_field(tv, obs_t, wv)
-        cut = (slice(i0 - lo[0], i0 - lo[0] + n[0]), slice(j0 - lo[1], j0 - lo[1] + n[1]),
-               slice(k0 - lo[2], k0 - lo[2] + n[2]))
-        vol = vol_t[cut].cpu().numpy()
-        w = wv[cut].cpu().numpy()
-        obs = w >= MIN_W
-        # A cube is meshed only when all 8 of its corners were observed.
-        cube = (obs[:-1, :-1, :-1] & obs[1:, :-1, :-1] & obs[:-1, 1:, :-1] & obs[1:, 1:, :-1]
-                & obs[:-1, :-1, 1:] & obs[1:, :-1, 1:] & obs[:-1, 1:, 1:] & obs[1:, 1:, 1:])
         prev = self.chunks.get(cid)
         ver = (prev["ver"] if prev else 0) + 1
         empty = {"ver": ver, "v": np.zeros(0, np.uint16), "n": np.zeros(0, np.int8), "c": np.zeros(0, np.uint8),
                  "f": np.zeros(0, np.uint32)}
-        if min(n) < 2 or not cube.any():
+
+        def clear() -> None:
             if prev is not None:
                 self.chunks[cid] = empty
-            return
-        vol = np.where(obs, vol, 1.0)
-        try:
-            verts, faces, _, _ = self.measure.marching_cubes(vol, 0.0)
-        except (ValueError, RuntimeError):
-            if prev is not None:
-                self.chunks[cid] = empty
-            return
-        # Keep only triangles whose vertices sit in cubes with all 8 corners observed: the
-        # border between observed and unobserved voxels is not a surface.
-        fl = np.clip(np.floor(verts).astype(int), 0, np.array(cube.shape) - 1)
-        vok = cube[fl[:, 0], fl[:, 1], fl[:, 2]]
-        faces = faces[vok[faces].all(axis=1)]
+
+        if min(n) < 2:
+            return clear()
+        pad = FILTER_PAD  # context around the chunk so smoothing is seamless across chunk borders
+        lo = (max(i0 - pad, 0), max(j0 - pad, 0), max(k0 - pad, 0))
+        hi = (min(i0 + n[0] + pad, nx), min(j0 + n[1] + pad, ny), min(k0 + n[2] + pad, nz))
+        big = (slice(lo[0], hi[0]), slice(lo[1], hi[1]), slice(lo[2], hi[2]))
+        wv = self.w.view(nx, ny, nz)[big].float()
+        obs_t = wv >= MIN_W
+        if not bool(obs_t.any()):
+            return clear()
+        vol_t = self._smooth_field(self.tsdf.view(nx, ny, nz)[big].float(), obs_t, wv)
+        cut = (slice(i0 - lo[0], i0 - lo[0] + n[0]), slice(j0 - lo[1], j0 - lo[1] + n[1]),
+               slice(k0 - lo[2], k0 - lo[2] + n[2]))
+        vol = vol_t[cut]
+        obs = obs_t[cut]
+        # A cube is meshed only when all 8 of its corners were observed.
+        cube = (obs[:-1, :-1, :-1] & obs[1:, :-1, :-1] & obs[:-1, 1:, :-1] & obs[1:, 1:, :-1]
+                & obs[:-1, :-1, 1:] & obs[1:, :-1, 1:] & obs[:-1, 1:, 1:] & obs[1:, 1:, 1:])
+        vol = torch.where(obs, vol, torch.ones_like(vol))
+        verts, faces = self.mc(vol, cube)
         if len(faces) == 0:
-            if prev is not None:
-                self.chunks[cid] = empty
-            return
-        used, faces = np.unique(faces, return_inverse=True)
-        faces = faces.reshape(-1, 3)
-        verts = verts[used]
-        # Normals from the volume gradient (toward free space); colours from the nearest voxel.
-        gx, gy, gz = np.gradient(vol)
-        vi = np.clip(np.rint(verts).astype(int), 0, np.array(vol.shape) - 1)
-        nrm = np.stack([gx[tuple(vi.T)], gy[tuple(vi.T)], gz[tuple(vi.T)]], axis=1)
-        nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-6)
-        col = self._sub(self.col, i0, j0, k0, n)[tuple(vi.T)].cpu().numpy()
-        world = (verts + np.array([i0, j0, k0]) + 0.5) * VOXEL
+            return clear()
+        # Normals from the smoothed field's gradient (toward free space); colour from the nearest voxel.
+        gx, gy, gz = torch.gradient(vol)
+        vi = verts.round().long()
+        vi = torch.stack([vi[:, 0].clamp(0, n[0] - 1), vi[:, 1].clamp(0, n[1] - 1), vi[:, 2].clamp(0, n[2] - 1)], dim=1)
+        nrm = torch.stack([gx[vi[:, 0], vi[:, 1], vi[:, 2]], gy[vi[:, 0], vi[:, 1], vi[:, 2]],
+                           gz[vi[:, 0], vi[:, 1], vi[:, 2]]], dim=1)
+        nrm = nrm / nrm.norm(dim=1, keepdim=True).clamp_min(1e-6)
+        col = self.col.view(nx, ny, nz, 3)[i0:i0 + n[0], j0:j0 + n[1], k0:k0 + n[2]][vi[:, 0], vi[:, 1], vi[:, 2]]
+        origin = torch.tensor([i0, j0, k0], device=self.device, dtype=verts.dtype)
+        world = (verts + origin + 0.5) * VOXEL
         self.chunks[cid] = {
             "ver": ver,
-            "v": np.rint(world / POS_UNIT).astype(np.uint16).reshape(-1),
-            "n": np.rint(nrm * 127).astype(np.int8).reshape(-1),
-            "c": col.astype(np.uint8).reshape(-1),
-            "f": faces.astype(np.uint32).reshape(-1),
+            "v": torch.round(world / POS_UNIT).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16).reshape(-1),
+            "n": torch.round(nrm * 127).to(torch.int8).cpu().numpy().reshape(-1),
+            "c": col.cpu().numpy().astype(np.uint8).reshape(-1),
+            "f": faces.to(torch.int32).cpu().numpy().astype(np.uint32).reshape(-1),
         }
 
     # ----------------------------------------------------------------- output
-    def updates(self, sent: dict[int, int], full: bool = False, limit: int = 6) -> list[tuple[int, dict]]:
-        """Chunks whose mesh changed since `sent` (chunk id -> version viewers have)."""
+    def updates(self, sent: dict[int, tuple], full: bool = False, limit: int = 6) -> list[tuple[int, dict]]:
+        """Chunks whose mesh changed since `sent` (chunk id -> (version, send order) that the
+        viewers have). The chunk that has waited longest since it was last sent goes first, so
+        a busy area cannot starve the rest."""
         if not self.available:
             return []
-        out = []
+        stale = []
         for cid, c in list(self.chunks.items()):
-            if not full and sent.get(cid) == c["ver"]:
+            have = sent.get(cid)
+            if not full and have is not None and have[0] == c["ver"]:
                 continue
-            if not full and len(c["f"]) == 0 and sent.get(cid, 0) == 0:
+            if not full and len(c["f"]) == 0 and have is None:
                 continue
-            out.append((cid, c))
-            if not full and len(out) >= limit:
-                break
-        return out
+            stale.append((have[1] if have is not None else -1, cid, c))
+        stale.sort(key=lambda x: x[0])
+        return [(cid, c) for _, cid, c in (stale if full else stale[:limit])]

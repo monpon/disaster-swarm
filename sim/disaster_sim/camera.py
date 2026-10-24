@@ -88,11 +88,74 @@ class RGBDCamera:
         self.pad = pad
         self.flat = padded.reshape(-1)
         self.strides = np.array([padded.shape[1] * padded.shape[2], padded.shape[2], 1], dtype=np.int64)
+        self.torch = None
+        try:  # render every drone's frame in one batch on the GPU when there is one
+            import torch
+            if torch.cuda.is_available():
+                dev = torch.device("cuda")
+                self.torch, self.dev = torch, dev
+                self.t_flat = torch.as_tensor(self.flat, device=dev)
+                self.t_steps = torch.as_tensor(self.k.steps, device=dev, dtype=torch.float32)
+                self.t_rays = torch.as_tensor(self.k.body_rays, device=dev, dtype=torch.float32)
+                self.t_colors = torch.as_tensor(M.COLORS, device=dev).float()
+                self.t_strides = torch.as_tensor(self.strides, device=dev)
+        except ImportError:
+            pass
 
     def _lookup(self, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """(materials, integer voxel coords) at world points (..., 3)."""
         vidx = np.floor(pts).astype(np.int64)
         return self.flat[(vidx + self.pad) @ self.strides], vidx
+
+    def capture_many(self, items: list, t: float) -> list[FramePacket]:
+        """Frames for several drones at once: items are (drone, pos, rot, omega)."""
+        if not items:
+            return []
+        if self.torch is None:
+            return [self.capture(d, t, p, r, w) for d, p, r, w in items]
+        depth, rgb = self._render_gpu(np.stack([p for _, p, _, _ in items]), np.stack([r for _, _, r, _ in items]))
+        k, out = self.k, []
+        for j, (d, pos, rot, omega) in enumerate(items):
+            img = self._degrade(rgb[j].reshape(k.h, k.w, 3), self.b.inside_building(pos[None, :])[0], omega)
+            size = int(self.jpeg_bytes * self.rng.uniform(0.8, 1.2))
+            out.append(FramePacket(d, t, img, size, sim_truth={"pos": pos.copy(), "rot": rot.copy(),
+                                                              "depth": depth[j].reshape(k.h, k.w).astype(np.float32)}))
+        return out
+
+    def _render_gpu(self, poss: np.ndarray, rots: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Ray-march (M drones x N pixels x S steps) through the voxel world on the GPU. Same
+        algorithm as `capture`: first solid sample, refine by half a step, shade by the face."""
+        torch, dev = self.torch, self.dev
+        pos = torch.as_tensor(poss, device=dev, dtype=torch.float32)
+        rot = torch.as_tensor(rots, device=dev, dtype=torch.float32)
+        dirs = torch.einsum("nk,mjk->mnj", self.t_rays, rot)  # (M, N, 3), world frame
+        S = self.t_steps
+        st = self.t_strides
+
+        def look(points):
+            v = torch.floor(points).long()
+            return self.t_flat[((v + self.pad) * st).sum(-1)].long(), v
+
+        pts = pos[:, None, None, :] + dirs[:, :, None, :] * S[None, None, :, None]  # (M, N, S, 3)
+        mat, _ = look(pts)
+        solid = mat != M.AIR
+        hit = solid.any(2)
+        first = solid.float().argmax(2)  # first solid sample (ties go to the first)
+        depth = S[first]
+        hit_mat, cur = look(pos[:, None, :] + dirs * depth[..., None])
+        back_mat, _ = look(pos[:, None, :] + dirs * (depth - STEP / 2)[..., None])
+        depth = torch.where(back_mat != M.AIR, depth - STEP / 2, depth)
+        prev_d = S[(first - 1).clamp(min=0)].clamp(min=0)
+        _, prev = look(pos[:, None, :] + dirs * prev_d[..., None])
+        crossed = (cur - prev).abs().float()
+        axis = torch.where(crossed.sum(-1) > 0, (crossed * dirs.abs()).argmax(-1), dirs.abs().argmax(-1))
+        facing = dirs.abs().gather(-1, axis[..., None])[..., 0]
+        shade = 0.8 + 0.2 * facing + torch.where((axis == 2) & (dirs[..., 2] < 0), 0.05, 0.0)
+        rgb = self.t_colors[hit_mat] * shade[..., None]
+        sky = torch.tensor([18.0, 22.0, 30.0], device=dev)
+        rgb = torch.where(hit[..., None], rgb, sky)
+        depth = torch.where(hit, depth.clamp(min=0.05), torch.zeros_like(depth))
+        return depth.cpu().numpy(), rgb.cpu().numpy()
 
     def capture(self, drone: int, t: float, pos: np.ndarray, rot: np.ndarray, omega: np.ndarray | None = None,
                 chunk: int = 6) -> FramePacket:

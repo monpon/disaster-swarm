@@ -2,6 +2,7 @@
 central node (perception, planning, piloting)."""
 from __future__ import annotations
 
+import time
 from collections import deque
 
 import numpy as np
@@ -57,7 +58,12 @@ class Simulation:
         self.history: list[tuple] = []  # (t, explored, scanned, survivors)
         self._truth_cache = None
         self.map_error_cache: dict = {}
+        self.prof: dict[str, float] = {}  # smoothed ms per call of each stage
         self._err_rng = np.random.default_rng(cfg.seed + 3000)
+
+    def _tick(self, name: str, t0: float) -> None:
+        d = (time.perf_counter() - t0) * 1000
+        self.prof[name] = self.prof.get(name, d) * 0.95 + d * 0.05
 
     def _every(self, hz: float) -> bool:
         return self.tick % max(1, round(self.cfg.physics_hz / hz)) == 0
@@ -69,8 +75,10 @@ class Simulation:
         wind = np.where(self.b.inside_building(f.pos)[:, None], 0.0, (self.wind_mean + self.gust)[None, :])
 
         if self._every(cfg.master_hz):
+            t0 = time.perf_counter()
             self.radio.update(f.pos, ~f.crashed)
             self.master.step(self.t)
+            self._tick("master_step", t0)
         self.radio.tick(dt)
 
         for direction, drone, msg in self.radio.receive(self.t):
@@ -79,13 +87,18 @@ class Simulation:
             elif isinstance(msg, ImuPacket):
                 self.master.on_telemetry(msg, self.t)
             else:
+                t0 = time.perf_counter()
                 self.master.on_frame(msg, self.t)
+                self._tick("on_frame", t0)
                 self.last_frames[drone] = msg
 
         if self._every(cfg.telemetry_hz):
             for pkt in self.esp.packets(f, self.t, dt, self.radio.routes):
                 self.radio.send_up(self.t, pkt.drone, pkt, pkt.nbytes)
-            for drone, cmd in self.master.control(self.t):
+            t0 = time.perf_counter()
+            cmds = self.master.control(self.t)
+            self._tick("control", t0)
+            for drone, cmd in cmds:
                 self.radio.send_down(self.t, drone, cmd, cmd.nbytes)
 
         if self._every(cfg.autopilot_hz):
@@ -93,11 +106,13 @@ class Simulation:
             self._charge(1.0 / cfg.autopilot_hz)
 
         if self._every(cfg.camera_hz):
-            for i in range(f.n):
-                if f.crashed[i] or f.grounded[i]:
-                    continue
+            t0 = time.perf_counter()
+            ids = [i for i in range(f.n) if not (f.crashed[i] or f.grounded[i])]
+            frames = self.camera.capture_many([(i, f.pos[i], f.rot[i], f.omega[i]) for i in ids], self.t)
+            self._tick("camera", t0)
+            for i, pkt in zip(ids, frames):
                 q = self.backlog[i]
-                q.append(self.camera.capture(i, self.t, f.pos[i], f.rot[i], f.omega[i]))
+                q.append(pkt)
                 if len(q) > FRAME_BUFFER:
                     q.popleft()  # onboard buffer full: oldest frame is lost
                     self.radio.frame_stats[i, 1] += 1
@@ -107,7 +122,9 @@ class Simulation:
 
         self.fc.vel_meas = self.esp.flow_velocity(f)
         self.fc.update(f, dt)
+        t0 = time.perf_counter()
         f.step(dt, wind, self.b)
+        self._tick("physics", t0)
         self.esp.sample(f, dt)
         self.tick += 1
         self.t += dt
@@ -225,6 +242,7 @@ class Simulation:
             "align_ok": round(self.master.map.align_ok / max(self.master.map.align_n, 1), 3),
             "align_mm": round(1000 * float(np.mean(self.master.align_dp or [0.0])), 0),
             "points": int(self.master.map.npts),
+            "prof": {k: round(v, 2) for k, v in self.prof.items()},
             "ext_cov": round(float(self.master.ext_cov), 3),
             "smoother": self.master.smoother.backend,
             "mesh": {"backend": self.master.surface.backend,

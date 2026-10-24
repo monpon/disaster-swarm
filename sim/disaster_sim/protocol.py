@@ -43,7 +43,8 @@ class MapStream:
         self.sent_raw = np.zeros((0, 3), np.float32)
         self.sent_sm = np.zeros((0, 3), np.float32)
         self.sent_hid = np.zeros(0, bool)
-        self.sent_chunks: dict[int, int] = {}
+        self.sent_chunks: dict[int, tuple] = {}  # chunk id -> (version, order sent)
+        self.sent_n = 0
         self.seen_sent = sim.master.map.seen.copy()
 
     def deltas(self, full: bool = False) -> dict:
@@ -91,8 +92,9 @@ class MapStream:
         out = []
         if full:
             self.sent_chunks = {}
-        for cid, c in self.sim.master.surface.updates(self.sent_chunks, full, limit=3 if not full else 10 ** 9):
-            self.sent_chunks[cid] = c["ver"]
+        for cid, c in self.sim.master.surface.updates(self.sent_chunks, full, limit=4 if not full else 10 ** 9):
+            self.sent_n += 1
+            self.sent_chunks[cid] = (c["ver"], self.sent_n)
             nv = len(c["v"]) // 3
             wide = nv >= 65536
             out.append({"id": int(cid), "nv": nv, "v": b64(c["v"], "<u2"), "n": b64(c["n"], "i1"), "c": b64(c["c"], "u1"),
