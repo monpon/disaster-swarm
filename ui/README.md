@@ -26,7 +26,7 @@ bun run check-types
 
 | Path | Screen |
 | --- | --- |
-| `/` | Landing page |
+| `/` | Landing page: scroll story (one drone vs. the swarm, shared map, split screen) |
 | `/incidents/new` | New incident: address search and incident type |
 | `/setup` | Mission setup: floor plan, geofence, drones, search settings |
 | `/live` | Live console: point cloud map, feeds, findings, crew channel |
@@ -43,6 +43,9 @@ cd apps/web/scripts/render-assets
 python3 gen2.py ../../public/assets      # cloud.png, f1-f4.png
 python3 plan.py ../../public/assets      # plan.png
 python3 streets.py ../../public/assets   # streets.png
+python3 story.py ../../public/assets     # story-points.bin, story.json (landing page)
 ```
+
+`story.py` simulates two searches of the same house along hand-drawn flight paths, four drones splitting the rooms and one drone visiting every room in turn, and records when each point of the cloud is first seen. The landing page draws the cloud on a canvas and scrubs that timeline with scroll. It is an illustration of the idea, not a measured result, and the page labels it that way.
 
 Map overlays (drones, pins, labels) are positioned in the pixel space of these images, so re-rendering with different projection parameters means updating the coordinates in `mock.ts` and the map components.
