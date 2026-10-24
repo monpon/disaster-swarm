@@ -1,0 +1,3 @@
+{
+  "extends": "@swarm/config/tsconfig.base.json"
+}
