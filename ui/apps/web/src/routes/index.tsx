@@ -4,12 +4,13 @@ import { ArrowRight } from "lucide-react";
 
 import { Mark } from "@/components/icons";
 import { Advantages } from "@/components/landing/advantages";
-import { Compare } from "@/components/landing/compare";
-import { Hero } from "@/components/landing/hero";
+import { Audio } from "@/components/landing/audio";
+import { HeroRace } from "@/components/landing/hero-race";
 import { MapStory } from "@/components/landing/map-story";
 import { SplitScreen } from "@/components/landing/split-screen";
 import { useStory } from "@/components/landing/story";
 import { UnderTheHood } from "@/components/landing/under-the-hood";
+import { Vitals } from "@/components/landing/vitals";
 
 export const Route = createFileRoute("/")({
   head: () => ({ meta: [{ title: "Swarm: when every second counts, send the swarm" }] }),
@@ -27,8 +28,8 @@ function Landing() {
         </Link>
         <div className="flex-1" />
         <nav className="hidden items-center gap-7 text-sm font-medium text-[#3a3a38] md:flex">
-          <a href="#compare">One vs. many</a>
           <a href="#how">How it works</a>
+          <a href="#vitals">Vitals</a>
           <a href="#judges">For judges</a>
         </nav>
         <Button variant="primary" size="md" render={<Link to="/live" />} nativeButton={false}>
@@ -36,17 +37,10 @@ function Landing() {
         </Button>
       </header>
 
-      <Hero story={story} />
-
-      <section className="flex flex-col items-center gap-4 px-4 pt-28 pb-24 text-center md:pt-36">
-        <h2 className="max-w-[980px] text-[36px] leading-[1.08] font-bold tracking-[-0.035em] md:text-[56px]">
-          After a building falls, rescuers can&apos;t see inside.
-        </h2>
-        <p className="max-w-[760px] text-lg leading-8 text-muted md:text-[21px]">Searching one room at a time is slow and dangerous. People inside are waiting.</p>
-      </section>
-
-      <Compare story={story} />
+      <HeroRace story={story} />
       <MapStory story={story} />
+      <Vitals />
+      <Audio />
       <Advantages story={story} />
       <SplitScreen story={story} />
       <UnderTheHood />

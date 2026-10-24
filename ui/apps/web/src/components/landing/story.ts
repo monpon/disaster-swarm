@@ -115,6 +115,10 @@ export function seenCount(story: Story, mode: Mode, t: number) {
   return lo;
 }
 
+export function roomsDone(story: Story, mode: Mode, t: number) {
+  return Object.values(story.rooms).filter((r) => r[mode] <= t).length;
+}
+
 /** Share of the reachable house mapped by time t (the swarm's full map is 100%). */
 export function coverage(story: Story, mode: Mode, t: number) {
   return seenCount(story, mode, t) / Math.max(1, seenCount(story, "swarm", Infinity));

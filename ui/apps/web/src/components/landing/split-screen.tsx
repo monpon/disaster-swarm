@@ -3,8 +3,8 @@ import { DoorClosed, Gamepad2, Radio, Sparkles, TriangleAlert, User } from "luci
 import type { ComponentType, ReactNode } from "react";
 
 import { PointCloud } from "./point-cloud";
-import type { Story } from "./story";
-import { roomsDone } from "./top-down";
+import { roomsDone, type Story } from "./story";
+
 import { range, useScrollProgress } from "./use-scroll-progress";
 
 /** Radio traffic in the one-drone setup, revealed as fractions of the swarm's run. */
