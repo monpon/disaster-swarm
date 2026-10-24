@@ -19,6 +19,7 @@ from .physics import F_MAX, QuadrotorFleet
 from .radio import Radio
 
 GUST_TAU = 4.0
+NAV_BYTES = 3000  # a thumbnail: what a frame shrinks to when the link cannot carry the full one
 FRAME_BUFFER = 160  # frames a drone can hold onboard while its link is down (~40 s)
 
 
@@ -58,12 +59,23 @@ class Simulation:
         self.history: list[tuple] = []  # (t, explored, scanned, survivors)
         self._truth_cache = None
         self.map_error_cache: dict = {}
+        self.cam_tick = 0
         self.prof: dict[str, float] = {}  # smoothed ms per call of each stage
         self._err_rng = np.random.default_rng(cfg.seed + 3000)
 
     def _tick(self, name: str, t0: float) -> None:
         d = (time.perf_counter() - t0) * 1000
         self.prof[name] = self.prof.get(name, d) * 0.95 + d * 0.05
+
+    def _should_capture(self, i: int) -> bool:
+        """The ESP's camera policy: full rate normally; one frame a second for a relay, or a
+        drone holding still (it would only photograph the same view); off on command."""
+        mode = self.esp.cam_mode[i]
+        if mode == "off":
+            return False
+        if mode == "nav" or self.esp.failsafe[i] or self.esp.link_hold[i]:
+            return self.cam_tick % 4 == i % 4
+        return True
 
     def _every(self, hz: float) -> bool:
         return self.tick % max(1, round(self.cfg.physics_hz / hz)) == 0
@@ -93,7 +105,7 @@ class Simulation:
                 self.last_frames[drone] = msg
 
         if self._every(cfg.telemetry_hz):
-            for pkt in self.esp.packets(f, self.t, dt, self.radio.routes):
+            for pkt in self.esp.packets(f, self.t, dt, self.radio, [len(q) for q in self.backlog]):
                 self.radio.send_up(self.t, pkt.drone, pkt, pkt.nbytes)
             t0 = time.perf_counter()
             cmds = self.master.control(self.t)
@@ -102,12 +114,13 @@ class Simulation:
                 self.radio.send_down(self.t, drone, cmd, cmd.nbytes)
 
         if self._every(cfg.autopilot_hz):
-            self.esp.apply(f, self.fc, self.t, 1.0 / cfg.autopilot_hz)
+            self.esp.apply(f, self.fc, self.t, 1.0 / cfg.autopilot_hz, self.radio)
             self._charge(1.0 / cfg.autopilot_hz)
 
         if self._every(cfg.camera_hz):
             t0 = time.perf_counter()
-            ids = [i for i in range(f.n) if not (f.crashed[i] or f.grounded[i])]
+            self.cam_tick += 1
+            ids = [i for i in range(f.n) if not (f.crashed[i] or f.grounded[i]) and self._should_capture(i)]
             frames = self.camera.capture_many([(i, f.pos[i], f.rot[i], f.omega[i]) for i in ids], self.t)
             self._tick("camera", t0)
             for i, pkt in zip(ids, frames):
@@ -117,8 +130,16 @@ class Simulation:
                     q.popleft()  # onboard buffer full: oldest frame is lost
                     self.radio.frame_stats[i, 1] += 1
             for i, q in enumerate(self.backlog):  # send buffered frames, oldest first
-                while q and self.radio.send_frame(self.t, i, q[0], q[0].nbytes):
-                    q.popleft()
+                while q:
+                    pk = q[0]
+                    if self.radio.send_frame(self.t, i, pk, pk.nbytes):
+                        q.popleft()
+                    elif self.radio.send_frame(self.t, i, pk, NAV_BYTES):  # shrink it rather than let it wait
+                        pk.thumb, pk.nbytes = True, NAV_BYTES
+                        self.radio.stats["thumbs"] += 1
+                        q.popleft()
+                    else:
+                        break
 
         self.fc.vel_meas = self.esp.flow_velocity(f)
         self.fc.update(f, dt)
@@ -243,6 +264,9 @@ class Simulation:
             "align_mm": round(1000 * float(np.mean(self.master.align_dp or [0.0])), 0),
             "points": int(self.master.map.npts),
             "prof": {k: round(v, 2) for k, v in self.prof.items()},
+            "lost_events": int(self.master.lost_events),
+            "slots": len(self.master.slots),
+            "thumbs": int(self.radio.stats["thumbs"]),
             "ext_cov": round(float(self.master.ext_cov), 3),
             "smoother": self.master.smoother.backend,
             "mesh": {"backend": self.master.surface.backend,
@@ -282,6 +306,9 @@ class Simulation:
                 "crashed": bool(f.crashed[i]),
                 "grounded": bool(f.grounded[i]),
                 "frozen": bool(self.esp.failsafe[i]),
+                "holding": bool(self.esp.link_hold[i]),
+                "snr": round(float(self.master.drones[i].parent_snr), 1),
+                "slot": None if self.master.drones[i].slot is None else int(self.master.drones[i].slot["id"]),
                 "landing_auto": bool(self.esp.auto_land[i]),
                 # What the master believes (VIO estimate): where the map view draws it.
                 "ep": [round(float(v), 3) for v in r.pos],

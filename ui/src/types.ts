@@ -79,7 +79,10 @@ export interface DroneState {
   mode: Mode;
   crashed: boolean;
   grounded: boolean;
-  frozen: boolean; // ESP failsafe: lost the command link, sticks centered, holding on optical flow
+  frozen: boolean;
+  holding: boolean; // stopped at the edge of coverage by its own link reflex
+  snr: number; // measured signal to its next hop (dB)
+  slot: number | null; // relay post it occupies // ESP failsafe: lost the command link, sticks centered, holding on optical flow
   landing_auto: boolean; // battery nearly flat: stock firmware landing in place
   ep: Vec3; // master's VIO estimate of the position
   eq: [number, number, number, number]; // master's estimate of the attitude
@@ -117,6 +120,9 @@ export interface Metrics {
   align_ok: number; // fraction of frames the master registered against its map
   align_mm: number; // mean size of that correction (mm)
   points: number;
+  lost_events: number; // times a drone lost contact
+  slots: number; // relay posts planned
+  thumbs: number; // frames sent as thumbnails instead of dropped
   ext_cov: number; // share of the building exterior seen so far
   smoother: string; // "cuda" | "cpu"
   smooth_ms: number;

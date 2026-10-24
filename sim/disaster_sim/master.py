@@ -24,6 +24,7 @@ from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
 
 from .align import align_frame
+from .comms import M_HOLD, M_MIN, LinkModel, plan_chain
 from .camera import Frame
 from .entry import opening_cue, ray_angles, servo_sticks
 from .estimation import SimulatedDepthNet, SimulatedVIO
@@ -65,7 +66,11 @@ VERIFY_RESID = 0.10  # ... as do surfaces the smoother finds rougher than this (
 SMOOTH_BATCH = 5000
 SCOUT_TILE = 6  # m: frontier cells are grouped into tiles this big
 SCOUT_LOOK_S = 2.0  # pause at a frontier so the map catches up with what the camera sees
-RELAY_HOLD_S = 45.0  # exterior relays hold station this long, then leapfrog
+MAX_SLOTS = 5  # relay slots at once (about a third of the fleet)
+RELIEF_SOC = 0.40  # a relay below this charge is relieved by a fresh drone
+SLOT_IDLE_S = 25.0  # a slot nothing uses for this long is given up
+DEMAND_TTL_S = 6.0
+LEASH_TAU = 3.0  # s ahead the motion filter looks
 RELAY_SETTLE_S = 10.0  # a relay on station this long without restoring contact -> chain another
 
 _SIX = ndimage.generate_binary_structure(3, 1)
@@ -107,6 +112,15 @@ class DroneRecord:
     servo_d0: float = 4.0
     cool: dict = field(default_factory=dict)  # entry id -> time before which not to retry it
     leg: dict | None = None  # the survey/scout leg this drone is flying
+    parent: int = -2  # next hop toward the base (-1 = the base)
+    parent_snr: float = -100.0
+    neighbors: list = field(default_factory=list)
+    holding: bool = False  # the drone's own link reflex has it holding at the edge of coverage
+    backlog: int = 0
+    slot: dict | None = None  # the relay slot this drone occupies
+    was_lost: bool = False
+    hold_since: float | None = None
+    reeling: bool = False
     scout_tile: tuple | None = None  # frontier tile this drone is heading for
     scout_ready_t: float = 0.0
     leg_map: list | None = None  # path index -> leg waypoint index
@@ -195,6 +209,13 @@ class MasterController:
         self.ext_cov = 0.0  # share of the building's outer surface that has been seen
         self.entry_change_t = 0.0
         self.scout_fail: dict[tuple, float] = {}
+        self.link = LinkModel(self.map)
+        self.slots: list[dict] = []
+        self.demand: dict = {}  # key -> (point, time): places that need coverage
+        self.lost_events = 0
+        self.slot_n = 0
+        self.demand_planned: dict = {}
+        self._nodes: list[np.ndarray] = [np.array(base, dtype=float)]
         self.scout_idle_since: float | None = None
         if outline is None:
             # Nothing is known about the site except its extent: open air everywhere until the
@@ -275,12 +296,23 @@ class MasterController:
             c = min(cells, key=lambda c: (c[0] - self.base[0]) ** 2 + (c[1] - self.base[1]) ** 2)
             cands.append((float(np.hypot(c[0] - self.base[0], c[1] - self.base[1])), key, c))
         cands.sort()
+        uncovered = False
+        admitted = []
+        for c in cands:  # only places the backbone already covers; for the rest, ask for a relay first
+            pt = np.array([c[2][0] + 0.5, c[2][1] + 0.5, zs])
+            if self._covered(pt):
+                admitted.append(c)
+            else:
+                uncovered = True
+                self._need(("scout", c[1]), pt, t)
+        cands = admitted
         free_drones = [r for r in self.drones if r.mode == WAIT and not self.lost(r, t) and not r.grounded
                        and r.scout_tile is None and t >= r.scout_ready_t and r.pos[2] > 2.0]
         busy = bool(enroute) or any(r.mode in (TAKEOFF, IDLE) and not r.survey_done for r in self.drones)
         if not cands:
-            self.scout_idle_since = self.scout_idle_since if (self.scout_idle_since is not None and not enroute) \
-                else (t if not enroute else None)
+            waiting = enroute or uncovered  # not idle while relays are being placed
+            self.scout_idle_since = self.scout_idle_since if (self.scout_idle_since is not None and not waiting) \
+                else (t if not waiting else None)
             return
         self.scout_idle_since = None
         if not free_drones:
@@ -377,7 +409,7 @@ class MasterController:
         """Estimate pose (VIO) and depth (mono depth net) for a received frame, then fuse it."""
         i = pkt.drone
         pos, rot = self.vio.pose(i, pkt.sim_truth)
-        depth = self.depthnet.estimate(pkt.sim_truth["depth"])
+        depth = self.depthnet.estimate(pkt.sim_truth["depth"], pkt.thumb)
         self.last_depth[i] = depth
         # Register the frame against the map (pose + depth scale), then fuse the corrected frame.
         m = self.map
@@ -432,6 +464,8 @@ class MasterController:
         r.yaw = float(np.arctan2(rot[1, 0], rot[0, 0]))
         r.soc, r.grounded, r.last_seen, r.frozen = m.battery, m.grounded, m.t, m.failsafe
         r.link_cap, r.hops = m.link_bps, m.hops
+        r.parent, r.neighbors, r.holding, r.backlog = m.parent, m.neighbors, m.holding, m.backlog
+        r.parent_snr = next((s for n, s in m.neighbors if n == m.parent), r.parent_snr if m.link_bps > 0 else -100.0)
         if not r.trail or np.linalg.norm(r.trail[-1] - r.pos) > 2.0:
             r.trail.append(r.pos.copy())
             r.trail = r.trail[-300:]
@@ -459,6 +493,7 @@ class MasterController:
     def step(self, t: float) -> None:
         self.tick += 1
         self._smooth()
+        self.link.refresh(self.interior)
         self._build_nav(t)
         self._update_envelope(t)
         self._detect_entries(t)
@@ -471,7 +506,7 @@ class MasterController:
         if self.phase == "scout":
             self._assign_scout(t)
         if self.phase in ("scout", "survey", "interior", "verify"):
-            self._plan_relays(t)
+            self._plan_backbone(t)
         self._check_paths(t)
 
     def _smooth(self) -> None:
@@ -500,6 +535,13 @@ class MasterController:
                 cmd = self._servo_command(r, t)
             else:
                 cmd = self.pilot.command(r, idle, r.mode == LANDING)
+            cmd.retreat = r.mode in (RTB, LANDING, TAKEOFF) or r.reeling
+            cmd.cam = "nav" if r.mode == RELAY else "full"
+            if r.mode not in (RTB, LANDING, TAKEOFF, RELAY):
+                cmd = self._leash(r, cmd, t)
+                if cmd.mode == "fly" and not cmd.retreat:  # back-pressure: let the buffer drain
+                    k = 0.0 if r.backlog > 100 else (0.5 if r.backlog > 60 else 1.0)
+                    cmd.vx, cmd.vy, cmd.vz = cmd.vx * k, cmd.vy * k, cmd.vz * k
             out.append((r.id, cmd))
             self._watch_stuck(r, cmd, t)
         return out
@@ -843,7 +885,17 @@ class MasterController:
                 r.survey_done = True
                 self._set_mode(r, WAIT, t)
                 return
-            g = min(open_, key=lambda g: float(np.linalg.norm(np.asarray(g["pts"][g["next_i"]][0]) - r.pos)))
+            ok_legs = []
+            for g0 in open_:
+                wp = np.asarray(g0["pts"][g0["next_i"]][0], dtype=float)
+                if self._covered(wp):
+                    ok_legs.append(g0)
+                else:
+                    self._need(("leg", id(g0)), wp, t)  # a relay first, then this leg
+            if not ok_legs:
+                self._set_mode(r, WAIT, t)
+                return
+            g = min(ok_legs, key=lambda g: float(np.linalg.norm(np.asarray(g["pts"][g["next_i"]][0]) - r.pos)))
             pts, yaws, leg_map = [], [], []
             prev = r.pos
             for k in range(g["next_i"], len(g["pts"])):
@@ -1006,6 +1058,9 @@ class MasterController:
                 continue
             vertical = abs(e.normal[2]) > 0.5
             stage = self._stage_point(e)
+            if not self._covered(stage):
+                self._need(("entry", e.id), stage, t)
+                continue
             approach = self._path_cells(r.pos, stage, strict=True)
             if approach is None:
                 r.cool[e.id] = t + ENTRY_COOLDOWN_S  # no route to it from here: try another
@@ -1167,6 +1222,9 @@ class MasterController:
                 self.unreachable[g["tile"]] = t + 20.0
                 continue
             vantage, yaw = vt
+            if not self._covered(vantage):
+                self._need(("vant", g["tile"]), vantage, t)  # a relay first, then the look
+                continue
             plans += 1
             if not self._fly_to(r, vantage, yaw):
                 self.unreachable[g["tile"]] = t + 20.0
@@ -1279,9 +1337,7 @@ class MasterController:
     def _reconnected(self, r: DroneRecord, t: float) -> None:
         """A drone that froze after losing its link is back in contact (usually through a
         relay that was sent out for it): give it fresh orders rather than its stale path."""
-        relays = [h for h in self.drones if h.mode == RELAY and h.serves == r.id]
-        via = f" via relay D{relays[-1].id}" if relays else ""
-        self._event(t, f"Drone {r.id} back in contact{via}", "success")
+        self._event(t, f"Drone {r.id} back in contact", "success")
         if r.mode in (RELAY, RTB, LANDING, TAKEOFF, SURVEY):
             return  # those keep their goals
         if r.mode in (ENTER, INVESTIGATE):
@@ -1289,90 +1345,175 @@ class MasterController:
             self._set_mode(r, EXPLORE if self._inside(r.pos) else WAIT, t)
         r.path, r.task, r.task_vantage, r.arrived_t = [], None, None, None
 
-    def _plan_relays(self, t: float) -> None:
-        for rl in [r for r in self.drones if r.mode == RELAY]:
-            served = self.drones[rl.serves] if rl.serves is not None else None
-            exterior = self.phase in ("scout", "survey")
-            keep = served is not None and not served.crashed and (
-                served.mode in (ENTER, EXPLORE, INVESTIGATE, RELAY, SURVEY) or self.lost(served, t))
-            if keep and exterior and rl.arrived_t is not None and t - rl.arrived_t > RELAY_HOLD_S \
-                    and not self.lost(served, t):
-                keep = False  # leapfrog: the sweeper has moved on, go and sweep (or relay again further out)
-            if not keep:
-                why = "crashed" if served is not None and served.crashed else (served.mode if served else "none")
-                self._event(t, f"Drone {rl.id} released from relay duty (served drone: {why})", "info")
-                rl.serves = None
-                self._set_mode(rl, EXPLORE if self._inside(rl.pos) else WAIT, t)
-                rl.path, rl.task, rl.arrived_t = [], None, None
-            elif rl.arrived_t is None and (not rl.path or np.linalg.norm(rl.pos - np.asarray(rl.path[-1])) < 1.5):
-                rl.arrived_t = t
-        relays = [r for r in self.drones if r.mode == RELAY]
+    # ------------------------------------------------------------ comms backbone
+    def _need(self, key, point, t: float) -> None:
+        """Somebody wants to be at `point`; record it so coverage can be extended there."""
+        self.demand[key] = (np.asarray(point, dtype=float), t)
 
-        # 1) Drones that went silent are frozen where they lost the link: bring a relay to
-        #    them. If the relays already sent are on station and it is still silent, chain
-        #    another one further out.
+    def _covered(self, p) -> bool:
+        return self.link.margin_at(np.asarray(p, dtype=float), self._nodes) >= M_MIN
+
+    def _plan_backbone(self, t: float) -> None:
+        """Relay backbone: relay slots are placed so every place the swarm wants to be is
+        covered, drones are assigned to them, relays are relieved before their battery runs
+        low, and slots nothing uses are given up. Scanners are only admitted to tasks inside
+        coverage (`_covered`), so a relay always gets there first."""
+        # contact bookkeeping; a drone at the edge or silent is a demand for coverage
         for r in self.drones:
-            if not self.lost(r, t) or r.crashed or r.mode == LANDING:
-                continue
-            if len(relays) >= max(2, len(self.drones) // 2):
-                break
-            mine = [rl for rl in relays if rl.serves == r.id]
-            if any(rl.arrived_t is None or t - rl.arrived_t < RELAY_SETTLE_S or self.lost(rl, t) for rl in mine):
-                continue
-            if self._post_relay(r, relays, t, rescue=True):
-                return  # one new relay per tick
+            lost = self.lost(r, t) and not r.crashed
+            if lost and not r.was_lost:
+                self.lost_events += 1
+                self._event(t, f"Drone {r.id} lost contact at ({r.pos[0]:.0f}, {r.pos[1]:.0f}, {r.pos[2]:.0f}): "
+                               f"holding until a relay reaches it", "error")
+            r.was_lost = lost
+            if lost:
+                self._need(("lost", r.id), r.pos, t)
+            elif r.holding and r.mode not in (RTB, LANDING, TAKEOFF):
+                self._need(("hold", r.id), r.pos, t)
+        self.demand = {k: v for k, v in self.demand.items() if t - v[1] <= DEMAND_TTL_S}
 
-        # 2) Connected drones whose link is too weak for their camera stream.
-        if len(relays) >= max(1, len(self.drones) // 3):
-            return
-        served = {r.serves for r in relays}
-        exterior = self.phase in ("scout", "survey")
+        # slots: who is on station, relief, usage, release
+        for sl in list(self.slots):
+            d = self.drones[sl["drone"]] if sl["drone"] is not None else None
+            if d is not None and (d.crashed or d.mode != RELAY or d.slot is not sl or self.lost(d, t)):
+                if d.slot is sl:
+                    d.slot = None
+                sl["drone"], sl["on_station"] = None, False
+                d = None
+            if d is not None:
+                sl["on_station"] = bool(np.linalg.norm(d.pos - sl["pos"]) < 3.0 and d.link_cap > 0)
+                if d.soc < RELIEF_SOC and sl["relief"] is None:
+                    sl["need_relief"] = True
+            rf = self.drones[sl["relief"]] if sl["relief"] is not None else None
+            if rf is not None:
+                if rf.crashed or rf.mode != RELAY or rf.slot is not sl:
+                    sl["relief"] = None
+                elif np.linalg.norm(rf.pos - sl["pos"]) < 3.0 and rf.link_cap > 0:  # relief is up: hand over
+                    if d is not None:
+                        d.slot, d.path = None, []
+                        self._set_mode(d, WAIT, t)
+                    sl["drone"], sl["relief"], sl["need_relief"], sl["on_station"] = rf.id, None, False, True
+                    d = rf
+            used = d is not None and any(o.parent == d.id and not o.grounded and not o.crashed for o in self.drones)
+            used = used or any(np.linalg.norm(p - sl["pos"]) < 45.0 for p, _ in self.demand.values())
+            if used or sl["drone"] is None:
+                sl["last_used"] = t
+            elif t - sl["last_used"] > SLOT_IDLE_S:  # nothing uses it any more
+                if d is not None:
+                    d.slot, d.path = None, []
+                    self._set_mode(d, WAIT, t)
+                if rf is not None:
+                    rf.slot, rf.path = None, []
+                    self._set_mode(rf, WAIT, t)
+                self.slots.remove(sl)
+        self._nodes = [self.base] + [self.drones[sl["drone"]].pos for sl in self.slots
+                                     if sl["drone"] is not None and sl["on_station"]]
+
+        # coverage gaps: plan the relay chain for the most urgent unmet demand
+        planned = 0
+        order = sorted(self.demand.items(), key=lambda kv: (kv[0][0] != "lost", kv[0][0] != "hold",
+                                                            float(np.linalg.norm(kv[1][0] - self.base))))
+        for key, (q, _) in order:
+            if planned >= 2 or len(self.slots) >= MAX_SLOTS:
+                break
+            urgent = key[0] in ("lost", "hold")
+            if not urgent and self._covered(q):
+                continue
+            if any(np.linalg.norm(q - sl["pos"]) < 6.0 for sl in self.slots) and not urgent:
+                continue  # a relay is already on its way there
+            if t - self.demand_planned.get(key, -99.0) < 4.0:
+                continue
+            self.demand_planned[key] = t
+            planned += 1
+            floor = M_MIN
+            if urgent:  # the prediction said covered but the drone is not: demand a stronger plan
+                floor = M_MIN + 6.0
+            anchors = list(self._nodes) + [sl["pos"] for sl in self.slots if not sl["on_station"]]
+            anchors.sort(key=lambda a: float(np.linalg.norm(a - q)))
+            best = None
+            for a in anchors[:3]:
+                path = self._path_cells(a, q, strict=True, max_exp=60000)
+                if path is None:
+                    continue
+                ch = plan_chain(self.link, path, a, q, floor)
+                if ch is not None and (best is None or len(ch) < len(best)):
+                    best = ch
+            for pos in best or []:
+                if len(self.slots) >= MAX_SLOTS or any(np.linalg.norm(pos - sl["pos"]) < 6.0 for sl in self.slots):
+                    continue
+                self.slot_n += 1
+                self.slots.append({"id": self.slot_n, "pos": np.asarray(pos, dtype=float), "drone": None,
+                                   "relief": None, "need_relief": False, "on_station": False, "last_used": t})
+
+        # assign drones to empty slots and to relief posts
+        posts = [(sl, "drone") for sl in self.slots if sl["drone"] is None and sl["relief"] is None] + \
+                [(sl, "relief") for sl in self.slots if sl["need_relief"] and sl["relief"] is None and sl["drone"] is not None]
+        if posts:
+            standby = (WAIT, IDLE, CHARGING)
+            work = (SURVEY, EXPLORE)
+            def eligible(h, modes):
+                return (h.mode in modes and not h.crashed and not self.lost(h, t) and h.slot is None
+                        and (not h.grounded or h.soc >= 0.8) and h.soc >= 0.5)
+            pool = [h for h in self.drones if eligible(h, standby)]
+            if not [h for h in pool if not h.grounded]:
+                pool += [h for h in self.drones if eligible(h, work)]  # nobody spare: a scanner stays behind
+            airborne = [h for h in pool if not h.grounded]
+            if not airborne:
+                for h in pool:  # fresh drones on the pads: get them up
+                    if h.grounded and h.mode in (IDLE, CHARGING):
+                        self._takeoff(h, t)
+                        break
+            elif airborne:
+                cost = np.array([[float(np.linalg.norm(h.pos - sl["pos"])) + (0.0 if h.mode in standby else 20.0)
+                                  for sl, _ in posts] for h in airborne])
+                rows, cols = linear_sum_assignment(cost)
+                for i, j in sorted(zip(rows, cols), key=lambda ij: cost[ij])[:2]:
+                    h, (sl, kind) = airborne[i], posts[j]
+                    if not self._fly_to(h, sl["pos"], None):
+                        continue
+                    self._release(h)
+                    h.task, h.task_vantage, h.arrived_t, h.slot = None, None, None, sl
+                    if not self._inside(h.pos):
+                        h.speed = 3.0
+                    sl[kind] = h.id
+                    self._set_mode(h, RELAY, t)
+                    self._event(t, f"Drone {h.id} to relay post {sl['id']} ({sl['pos'][0]:.0f}, {sl['pos'][1]:.0f}, "
+                                   f"{sl['pos'][2]:.0f}){' (relief)' if kind == 'relief' else ''}", "info")
+
+        # a drone that has been holding at the edge too long reels in toward coverage
         for r in self.drones:
-            if r.mode not in (EXPLORE, INVESTIGATE, SURVEY) or r.id in served or len(r.trail) < 3 or self.lost(r, t):
-                continue
-            if r.link_cap >= self.frame_need * (1.5 if exterior else 1.0):
-                continue  # outside, act before the link is gone: the whole sweep fans out at once
-            if self._post_relay(r, relays, t, rescue=False):
-                return
+            if r.holding and not self.lost(r, t) and r.mode in (SURVEY, EXPLORE, INVESTIGATE, WAIT):
+                r.hold_since = r.hold_since if r.hold_since is not None else t
+                if t - r.hold_since > 25.0 and not r.path:
+                    back = next((p for p in reversed(r.trail) if self._covered(p)), self.base)
+                    self._fly_to(r, back, None)
+                    r.reeling = True
+            else:
+                r.hold_since, r.reeling = None, False
 
-    def _post_relay(self, r: DroneRecord, relays: list, t: float, rescue: bool) -> bool:
-        """Send the best available drone to a point on `r`'s trail that bridges the mesh
-        (base station plus every drone still in contact) and `r`'s last known position."""
-        if len(r.trail) < 2:
-            return False
-        chain = [self.base] + [h.pos for h in self.drones
-                               if h.id != r.id and not h.crashed and not h.grounded and not self.lost(h, t)
-                               and h.link_cap > 0]
-        best, best_score = None, -1.0
-        for p in r.trail[::-1]:
-            to_chain = max(self._predict_cap(p, c) for c in chain)
-            score = min(to_chain, self._predict_cap(p, r.pos))
-            if score > best_score:
-                best, best_score = p, score
-            if score >= RELAY_TARGET_BPS:
-                break
-        ok_modes = (EXPLORE, WAIT) if not rescue else (EXPLORE, WAIT, IDLE, CHARGING)
-        if self.phase in ("scout", "survey"):
-            ok_modes = ok_modes + (SURVEY,)  # everyone is sweeping: a sweeper stays behind to relay
-        helpers = [h for h in self.drones if h.mode in ok_modes and h.id != r.id and not self.lost(h, t)
-                   and (not h.grounded or h.soc >= 0.8)]
-        if best is None or not helpers:
-            return False
-        h = min(helpers, key=lambda h: np.linalg.norm(h.pos - best))
-        look = r.pos - best
-        if not self._fly_to(h, best, float(np.arctan2(look[1], look[0]))):
-            return False
-        if not self._inside(h.pos):
-            h.speed = 3.0  # outside: no need to creep
-        self._release(h)
-        h.task, h.task_vantage, h.serves, h.arrived_t = None, None, r.id, None
-        self._set_mode(h, RELAY, t)
-        if rescue:
-            self._event(t, f"Drone {r.id} silent, frozen at ({r.pos[0]:.0f}, {r.pos[1]:.0f}, {r.pos[2]:.0f}): "
-                           f"sending drone {h.id} as relay", "warn")
-        else:
-            self._event(t, f"Drone {h.id} posted as radio relay for drone {r.id}", "warn")
-        return True
+    def _leash(self, r: DroneRecord, cmd: StickCommand, t: float) -> StickCommand:
+        """Control barrier on link margin: never ask a drone to go where its link would fall
+        below M_HOLD. Looks LEASH_TAU seconds ahead along the commanded velocity, slows the
+        command as the predicted margin shrinks and stops it at M_HOLD, and records where
+        coverage is wanted. The drone's own reflex does the same from its measurement, so
+        this is the predictive half."""
+        if cmd.mode != "fly" or cmd.retreat or r.grounded or r.parent == -2:
+            return cmd
+        par = self.base if r.parent == -1 else self.drones[r.parent].pos
+        c, s = np.cos(r.yaw), np.sin(r.yaw)
+        v = np.array([c * cmd.vx - s * cmd.vy, s * cmd.vx + c * cmd.vy, cmd.vz])
+        if np.linalg.norm(v) < 0.1:
+            return cmd
+        now = self.link.snr(r.pos, par)
+        measured = r.parent_snr if r.parent_snr > -50 else now
+        corr = float(np.clip(measured - now, -15.0, 15.0))  # what the map does not know about this link
+        ahead = self.link.snr(r.pos + v * LEASH_TAU, par) + corr
+        if ahead >= M_MIN or ahead >= measured:
+            return cmd
+        k = float(np.clip((ahead - M_HOLD) / (M_MIN - M_HOLD), 0.0, 1.0))
+        self._need(("leash", r.id), r.pos + v * LEASH_TAU, t)
+        cmd.vx, cmd.vy, cmd.vz = cmd.vx * k, cmd.vy * k, cmd.vz * k
+        return cmd
 
     # ------------------------------------------------------------ path upkeep
     def _check_paths(self, t: float) -> None:

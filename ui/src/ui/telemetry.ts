@@ -43,7 +43,9 @@ export class Telemetry {
     $("m-scanned").textContent = `${(m.scanned * 100).toFixed(1)}%`;
     $("m-found").textContent = `${m.found}/${m.survivors}`;
     $("m-air").textContent = String(m.airborne);
-    $("m-relays").textContent = String(m.relays);
+    $("m-relays").textContent = `${m.relays}/${m.slots}`;
+    $("m-losses").textContent = String(m.lost_events);
+    $("m-losses").parentElement!.classList.toggle("alert", m.lost_events > 0);
     $("m-lost").textContent = String(m.crashed);
     $("m-lost").parentElement!.classList.toggle("alert", m.crashed > 0);
     const tot = m.frames_ok + m.frames_dropped;
@@ -85,7 +87,8 @@ export class Telemetry {
       bar.style.width = `${d.soc * 100}%`;
       bar.style.background = battColor(d.soc);
       const lnk = row.querySelector(".lnk") as HTMLElement;
-      lnk.textContent = d.grounded ? "—" : d.link > 0 ? `${d.link.toFixed(1)}${d.hops > 1 ? `·${d.hops}h` : ""}` : "LOST";
+      lnk.textContent = d.grounded ? "—" : d.link > 0 ? `${d.link.toFixed(1)}${d.hops > 1 ? `·${d.hops}h` : ""}${d.holding ? " ⏸" : ""}` : "LOST";
+      lnk.title = d.grounded ? "" : `signal to next hop ${d.snr} dB${d.holding ? " · holding at the edge of coverage" : ""}${d.slot ? ` · relay post ${d.slot}` : ""}`;
       lnk.style.color = d.grounded ? "" : linkColor(d.link);
       const bk = row.querySelector(".bk") as HTMLElement;
       bk.textContent = d.grounded ? "" : d.drift.toFixed(1);

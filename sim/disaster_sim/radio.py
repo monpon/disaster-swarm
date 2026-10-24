@@ -85,10 +85,11 @@ class Radio:
         self.n = cfg.n_drones
         self.routes = [Route() for _ in range(self.n)]
         self.link_cap = np.zeros((self.n + 1, self.n + 1))  # node 0 = base, i+1 = drone i
+        self.snr = np.full((self.n + 1, self.n + 1), -100.0)  # link SNR (dB), what each ESP can measure
         self.tokens = np.zeros(self.n)  # uplink byte budget per drone
         self.queue: list[tuple[float, int, str, int, Any]] = []  # (deliver_t, seq, dir, drone, payload)
         self._seq = 0
-        self.stats = {"frames_sent": 0, "frames_dropped": 0, "bytes": 0}
+        self.stats = {"frames_sent": 0, "frames_dropped": 0, "bytes": 0, "thumbs": 0}
         self.frame_stats = np.zeros((self.n, 2), dtype=np.int64)  # delivered, dropped per drone
 
     # --------------------------------------------------------------- topology
@@ -102,14 +103,18 @@ class Radio:
         nodes = np.vstack([self.base[None, :], pos])
         k = len(nodes)
         cap = np.zeros((k, k))
+        snr_m = np.full((k, k), -100.0)
         for i in range(k):
             for j in range(i + 1, k):
                 if (i and not alive[i - 1]) or not alive[j - 1]:
                     continue
                 d = float(np.linalg.norm(nodes[i] - nodes[j]))
                 loss = path_loss_db(np.array(d)) + obstruction_db(self._materials_between(nodes[i], nodes[j]), 0.5)
-                cap[i, j] = cap[j, i] = float(capacity_for(TX_DBM - loss - NOISE_DBM))
+                snr = TX_DBM - loss - NOISE_DBM
+                snr_m[i, j] = snr_m[j, i] = snr
+                cap[i, j] = cap[j, i] = float(capacity_for(snr))
         self.link_cap = cap
+        self.snr = snr_m
 
         # Widest path from the base to every node (max-bottleneck Dijkstra, ties -> fewer hops).
         width = np.zeros(k)
@@ -157,6 +162,22 @@ class Radio:
                 u = parent[u]
             node_path.append(-1)
             self.routes[i] = Route(share, len(p), node_path)
+
+    # -------------------------------------------------------- what an ESP can measure
+    def parent_of(self, drone: int) -> int:
+        """Next hop toward the base for a drone (-1 = the base, -2 = not connected)."""
+        p = self.routes[drone].path
+        return int(p[1]) if len(p) > 1 else (-2 if not self.routes[drone].connected else -1)
+
+    def parent_snr(self, drone: int) -> float:
+        par = self.parent_of(drone)
+        return float(self.snr[drone + 1, par + 1]) if par != -2 else -100.0
+
+    def neighbors(self, drone: int, k: int = 4) -> list[tuple[int, float]]:
+        row = self.snr[drone + 1].copy()
+        row[drone + 1] = -100.0
+        best = np.argsort(-row)[:k]
+        return [(int(j) - 1, round(float(row[j]), 1)) for j in best if row[j] > 0]
 
     # --------------------------------------------------------------- delivery
     def tick(self, dt: float) -> None:

@@ -116,7 +116,7 @@ class SimulatedDepthNet:
         self.region_sigma = cfg.depth_region_sigma
         self.depth_max = cfg.depth_max
 
-    def estimate(self, depth: np.ndarray) -> np.ndarray:
+    def estimate(self, depth: np.ndarray, thumb: bool = False) -> np.ndarray:
         """Monocular depth estimate (H, W) for a frame whose true depth is `depth` (0 = no
         return / sky). Returns 0 where the estimate should not be trusted."""
         h, w = depth.shape
@@ -129,9 +129,10 @@ class SimulatedDepthNet:
         blur = np.where(ok, win, 0.0).sum(axis=0) / np.maximum(ok.sum(axis=0), 1)
         d = np.where(valid, 0.75 * d + 0.25 * np.nan_to_num(blur, nan=0.0), 0.0)
         # Per-frame scale error and blocky region errors (4x4 pixel blocks).
-        scale = np.exp(self.rng.normal(0.0, self.scale_sigma))
+        q = 1.6 if thumb else 1.0  # a thumbnail gives the depth network less to go on
+        scale = np.exp(self.rng.normal(0.0, self.scale_sigma * q))
         bh, bw = -(-h // 4), -(-w // 4)
-        region = np.repeat(np.repeat(self.rng.normal(0.0, self.region_sigma, (bh, bw)), 4, 0), 4, 1)[:h, :w]
+        region = np.repeat(np.repeat(self.rng.normal(0.0, self.region_sigma * q, (bh, bw)), 4, 0), 4, 1)[:h, :w]
         noise = self.rng.normal(0.0, 0.02, (h, w))
         est = d * scale * (1.0 + region + noise)
         return np.where(valid & (est > 0.1) & (est < self.depth_max), est, 0.0).astype(np.float32)

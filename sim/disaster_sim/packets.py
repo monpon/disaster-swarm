@@ -31,6 +31,10 @@ class ImuPacket:
     failsafe: bool  # ESP lost the command link and is holding the sticks neutral
     link_bps: float = 0.0  # mesh route throughput the ESP currently gets to the root
     hops: int = 0
+    parent: int = -2  # next hop toward the root (-1 = the root itself, -2 = none)
+    neighbors: list = field(default_factory=list)  # (node, SNR dB) for the strongest links; node -1 = root
+    holding: bool = False  # the link reflex is holding the sticks centred (edge of coverage)
+    backlog: int = 0  # full-quality frames waiting in the ESP's buffer
     sim_truth: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -45,6 +49,7 @@ class FramePacket:
     t: float
     rgb: np.ndarray  # (H, W, 3) uint8, as decoded by the master
     nbytes: int  # JPEG size on the wire
+    thumb: bool = False  # sent as a small thumbnail because the link could not carry the full frame
     sim_truth: dict = field(default_factory=dict, repr=False)
 
 
@@ -60,3 +65,5 @@ class StickCommand:
     vz: float = 0.0  # climb, m/s
     yaw_rate: float = 0.0  # rad/s, counter-clockwise
     nbytes: int = 16
+    retreat: bool = False  # heading back toward coverage/base: the link reflex must not hold this
+    cam: str = "full"  # camera policy: full (nav + bulk frames) | nav (small frames only) | off

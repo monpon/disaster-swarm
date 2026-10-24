@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from .packets import ImuPacket, StickCommand
+from .comms import M_HOLD, M_RESUME
 from .physics import G
 
 STICK_TIMEOUT = 0.5  # s without a command -> neutral sticks
@@ -31,6 +32,9 @@ class EspFleet:
         self.cmd_t = np.full(n, -1e9)
         self.failsafe = np.zeros(n, dtype=bool)
         self.auto_land = np.zeros(n, dtype=bool)
+        self.link_hold = np.zeros(n, dtype=bool)  # link reflex: parent link too weak to move on
+        self.cam_mode = ["full"] * n
+        self.snr_hist: list[list] = [[] for _ in range(n)]
         self.accel_bias = rng.normal(0.0, 0.05, (n, 3))
         self.gyro_bias = rng.normal(0.0, 0.003, (n, 3))
         self.flow_bias = np.zeros((n, 2))
@@ -52,13 +56,32 @@ class EspFleet:
         self.flow_bias = np.clip(self.flow_bias + self.rng.normal(0, FLOW_BIAS_WALK * s, (self.n, 2)),
                                  -FLOW_BIAS_MAX, FLOW_BIAS_MAX)
 
+    def _link_reflex(self, i: int, cmd: StickCommand, t: float, snr: float, grounded: bool) -> None:
+        """Stop at the edge of coverage on the drone's own signal measurement: below M_HOLD the
+        sticks are centred (hover) even though commands keep arriving, until the link is back
+        above M_RESUME or is clearly improving. Retreat commands (home, back into coverage)
+        are never held. The master answers a holding drone by placing a relay."""
+        h = self.snr_hist[i]
+        h.append((t, snr))
+        while h and t - h[0][0] > 1.0:
+            h.pop(0)
+        if grounded or cmd.mode in ("land", "disarm") or snr <= 0 or cmd.retreat:
+            self.link_hold[i] = False
+            return
+        rising = len(h) > 3 and snr - h[0][1] > 1.0
+        if self.link_hold[i]:
+            if snr >= M_RESUME or rising:
+                self.link_hold[i] = False
+        elif snr < M_HOLD:
+            self.link_hold[i] = True
+
     def flow_velocity(self, fleet) -> np.ndarray:
         """The stock FC's own velocity estimate (optical flow + baro), biased."""
         v = fleet.vel.copy()
         v[:, :2] += self.flow_bias
         return v
 
-    def packets(self, fleet, t: float, dt: float, routes) -> list[ImuPacket]:
+    def packets(self, fleet, t: float, dt: float, radio, backlog) -> list[ImuPacket]:
         """Batch the IMU samples gathered since the last call into one packet per drone."""
         if not self._acc:
             return []
@@ -68,7 +91,8 @@ class EspFleet:
         for i in range(self.n):
             out.append(ImuPacket(
                 i, t, dt, acc[i], gyr[i], float(fleet.soc[i]), bool(fleet.grounded[i]),
-                bool(fleet.crashed[i]), bool(self.failsafe[i]), routes[i].capacity, routes[i].hops,
+                bool(fleet.crashed[i]), bool(self.failsafe[i]), radio.routes[i].capacity, radio.routes[i].hops,
+                radio.parent_of(i), radio.neighbors(i), bool(self.link_hold[i]), int(backlog[i]),
                 sim_truth={"pos": fleet.pos[i].copy(), "vel": fleet.vel[i].copy(),
                            "rot": fleet.rot[i].copy(), "grounded": bool(fleet.grounded[i])}))
         return out
@@ -80,7 +104,7 @@ class EspFleet:
         self.cmd[cmd.drone] = cmd
         self.cmd_t[cmd.drone] = t
 
-    def apply(self, fleet, fc, t: float, dt: float) -> None:
+    def apply(self, fleet, fc, t: float, dt: float, radio=None) -> None:
         """Turn the latest sticks into the stock flight controller's setpoints."""
         yaw = np.arctan2(fleet.rot[:, 1, 0], fleet.rot[:, 0, 0])
         for i in range(self.n):
@@ -88,6 +112,9 @@ class EspFleet:
                 fc.armed[i] = False
                 continue
             cmd = self.cmd[i]
+            self.cam_mode[i] = cmd.cam
+            if radio is not None:
+                self._link_reflex(i, cmd, t, radio.parent_snr(i), bool(fleet.grounded[i]))
             self.failsafe[i] = t - self.cmd_t[i] > STICK_TIMEOUT and not fleet.grounded[i]
             self.auto_land[i] |= fleet.soc[i] < AUTO_LAND_SOC and not fleet.grounded[i]
             if self.auto_land[i] or (cmd.mode == "land" and not self.failsafe[i]):
@@ -97,7 +124,7 @@ class EspFleet:
                 fc.vel_sp[i] = (0.0, 0.0, -LAND_RATE)
                 fc.armed[i] = True
                 continue
-            if self.failsafe[i]:  # centered sticks: hold on optical flow
+            if self.failsafe[i] or self.link_hold[i]:  # centered sticks: hold on optical flow
                 fc.vel_sp[i] = 0.0
                 fc.armed[i] = True
                 continue
