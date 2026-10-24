@@ -66,7 +66,7 @@ VERIFY_RESID = 0.10  # ... as do surfaces the smoother finds rougher than this (
 SMOOTH_BATCH = 5000
 SCOUT_TILE = 6  # m: frontier cells are grouped into tiles this big
 SCOUT_LOOK_S = 2.0  # pause at a frontier so the map catches up with what the camera sees
-MAX_SLOTS = 5  # relay slots at once (about a third of the fleet)
+MAX_SLOTS = 6  # relay posts at once (a third or so of the fleet)
 RELIEF_SOC = 0.40  # a relay below this charge is relieved by a fresh drone
 SLOT_IDLE_S = 25.0  # a slot nothing uses for this long is given up
 DEMAND_TTL_S = 6.0
@@ -120,6 +120,9 @@ class DroneRecord:
     slot: dict | None = None  # the relay slot this drone occupies
     was_lost: bool = False
     hold_since: float | None = None
+    leash_k: float = 1.0
+    leash_t: float = -1.0
+    leash_dir: np.ndarray | None = None
     reeling: bool = False
     scout_tile: tuple | None = None  # frontier tile this drone is heading for
     scout_ready_t: float = 0.0
@@ -216,6 +219,7 @@ class MasterController:
         self.slot_n = 0
         self.demand_planned: dict = {}
         self._nodes: list[np.ndarray] = [np.array(base, dtype=float)]
+        self._nodes_plan: list[np.ndarray] = [np.array(base, dtype=float)]  # ... plus posts that have a relay on the way
         self.scout_idle_since: float | None = None
         if outline is None:
             # Nothing is known about the site except its extent: open air everywhere until the
@@ -1351,7 +1355,7 @@ class MasterController:
         self.demand[key] = (np.asarray(point, dtype=float), t)
 
     def _covered(self, p) -> bool:
-        return self.link.margin_at(np.asarray(p, dtype=float), self._nodes) >= M_MIN
+        return self.link.margin_at(np.asarray(p, dtype=float), self._nodes_plan) >= M_MIN
 
     def _plan_backbone(self, t: float) -> None:
         """Relay backbone: relay slots are placed so every place the swarm wants to be is
@@ -1408,13 +1412,16 @@ class MasterController:
                 self.slots.remove(sl)
         self._nodes = [self.base] + [self.drones[sl["drone"]].pos for sl in self.slots
                                      if sl["drone"] is not None and sl["on_station"]]
+        # tasks may be admitted around a post whose relay is already on its way
+        self._nodes_plan = self._nodes + [sl["pos"] for sl in self.slots
+                                          if sl["drone"] is not None and not sl["on_station"]]
 
         # coverage gaps: plan the relay chain for the most urgent unmet demand
         planned = 0
         order = sorted(self.demand.items(), key=lambda kv: (kv[0][0] != "lost", kv[0][0] != "hold",
                                                             float(np.linalg.norm(kv[1][0] - self.base))))
         for key, (q, _) in order:
-            if planned >= 2 or len(self.slots) >= MAX_SLOTS:
+            if planned >= 3 or len(self.slots) >= MAX_SLOTS:
                 break
             urgent = key[0] in ("lost", "hold")
             if not urgent and self._covered(q):
@@ -1495,24 +1502,34 @@ class MasterController:
         """Control barrier on link margin: never ask a drone to go where its link would fall
         below M_HOLD. Looks LEASH_TAU seconds ahead along the commanded velocity, slows the
         command as the predicted margin shrinks and stops it at M_HOLD, and records where
-        coverage is wanted. The drone's own reflex does the same from its measurement, so
-        this is the predictive half."""
-        if cmd.mode != "fly" or cmd.retreat or r.grounded or r.parent == -2:
+        coverage is wanted. Margin is judged against the backbone (base + relay posts, those on
+        station and those on their way), not against whichever scanner the mesh happens to
+        route through. The drone's own reflex does the same from its measurement; this is the
+        predictive half. Recomputed at 4 Hz per drone and reused in between."""
+        if cmd.mode != "fly" or cmd.retreat or r.grounded:
             return cmd
-        par = self.base if r.parent == -1 else self.drones[r.parent].pos
         c, s = np.cos(r.yaw), np.sin(r.yaw)
         v = np.array([c * cmd.vx - s * cmd.vy, s * cmd.vx + c * cmd.vy, cmd.vz])
-        if np.linalg.norm(v) < 0.1:
+        sp = float(np.linalg.norm(v))
+        if sp < 0.1:
             return cmd
-        now = self.link.snr(r.pos, par)
-        measured = r.parent_snr if r.parent_snr > -50 else now
-        corr = float(np.clip(measured - now, -15.0, 15.0))  # what the map does not know about this link
-        ahead = self.link.snr(r.pos + v * LEASH_TAU, par) + corr
-        if ahead >= M_MIN or ahead >= measured:
-            return cmd
-        k = float(np.clip((ahead - M_HOLD) / (M_MIN - M_HOLD), 0.0, 1.0))
-        self._need(("leash", r.id), r.pos + v * LEASH_TAU, t)
-        cmd.vx, cmd.vy, cmd.vz = cmd.vx * k, cmd.vy * k, cmd.vz * k
+        d = v / sp
+        if r.leash_dir is None or t - r.leash_t >= 0.25 or float(np.dot(r.leash_dir, d)) < 0.9:
+            nodes = sorted(self._nodes_plan, key=lambda n: float(np.linalg.norm(n - r.pos)))[:3]
+            now = max(self.link.snr(r.pos, n) for n in nodes)
+            corr = 0.0
+            if r.parent_snr > -50 and r.parent != -2:  # what the map does not know about this drone's links
+                pp = self.base if r.parent == -1 else self.drones[r.parent].pos
+                corr = float(np.clip(r.parent_snr - self.link.snr(r.pos, pp), -12.0, 12.0))
+            ahead = max(self.link.snr(r.pos + v * LEASH_TAU, n) for n in nodes) + corr
+            k = 1.0
+            if ahead < M_MIN and ahead < now + corr:
+                k = float(np.clip((ahead - M_HOLD) / (M_MIN - M_HOLD), 0.0, 1.0))
+                self._need(("leash", r.id), r.pos + v * LEASH_TAU, t)
+            r.leash_k, r.leash_t, r.leash_dir = k, t, d
+        k = r.leash_k
+        if k < 1.0:
+            cmd.vx, cmd.vy, cmd.vz = cmd.vx * k, cmd.vy * k, cmd.vz * k
         return cmd
 
     # ------------------------------------------------------------ path upkeep
