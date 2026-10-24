@@ -63,6 +63,8 @@ VERIFY_PENALTY = 25.0  # verify tiles cost this much extra while exploration is 
 VERIFY_NPASS = 2  # surfaces seen from fewer separate passes than this need a re-scan
 VERIFY_RESID = 0.10  # ... as do surfaces the smoother finds rougher than this (m)
 SMOOTH_BATCH = 5000
+SCOUT_TILE = 6  # m: frontier cells are grouped into tiles this big
+SCOUT_LOOK_S = 2.0  # pause at a frontier so the map catches up with what the camera sees
 RELAY_HOLD_S = 45.0  # exterior relays hold station this long, then leapfrog
 RELAY_SETTLE_S = 10.0  # a relay on station this long without restoring contact -> chain another
 
@@ -105,6 +107,8 @@ class DroneRecord:
     servo_d0: float = 4.0
     cool: dict = field(default_factory=dict)  # entry id -> time before which not to retry it
     leg: dict | None = None  # the survey/scout leg this drone is flying
+    scout_tile: tuple | None = None  # frontier tile this drone is heading for
+    scout_ready_t: float = 0.0
     leg_map: list | None = None  # path index -> leg waypoint index
     leg_path: list | None = None
     win: list | None = None  # stuck-detection window: start time, start position, commanded distance
@@ -190,11 +194,13 @@ class MasterController:
         self.gap_tries: dict[tuple, int] = {}
         self.ext_cov = 0.0  # share of the building's outer surface that has been seen
         self.entry_change_t = 0.0
+        self.scout_fail: dict[tuple, float] = {}
+        self.scout_idle_since: float | None = None
         if outline is None:
             # Nothing is known about the site except its extent: open air everywhere until the
             # scouts find the building.
             self._set_envelope(None)
-            self._begin_legs(self._plan_scout())
+            self._seed_launch_area(pads)
         else:
             self._set_envelope(outline)
             self._begin_legs(self._plan_survey())
@@ -225,6 +231,81 @@ class MasterController:
         outdoor[:, :, sz - 2:] = False
         self.interior, self.outdoor = interior, outdoor
         self.map.sparse2d = outdoor[:, :, 1].copy()
+
+    def _seed_launch_area(self, pads: np.ndarray) -> None:
+        """The launch area is known to be clear (the operator is standing in it), so the first
+        scouts have somewhere to fly."""
+        free = self.map.grid(self.map.lo)
+        for x, y in pads:
+            x, y = int(x), int(y)
+            free[max(x - 7, 0):x + 8, max(y - 7, 0):y + 8, 1:10] = -20
+
+    def _scout_frontiers(self):
+        m = self.map
+        zs = int(self.cfg.scout_alt)
+        sx, sy, _ = self.shape
+        free = m.grid(m.free)[:, :, zs]
+        occ = m.grid(m.occupied)[:, :, max(zs - 1, 0):zs + 2].any(axis=2)
+        inb = np.zeros((sx, sy), dtype=bool)
+        inb[5:sx - 5, 5:sy - 5] = True
+        unknown = ~(free | occ) & inb
+        near = ndimage.binary_dilation(occ, iterations=2)
+        keep2 = self.keep.any(axis=2) if self.keep is not None else np.zeros((sx, sy), dtype=bool)
+        fr = free & ndimage.binary_dilation(unknown) & ~near & ~keep2 & inb
+        return fr, unknown
+
+    def _assign_scout(self, t: float) -> None:
+        """Frontier exploration of the outside, closest to the base first: each free scout
+        flies (through space already seen to be clear) to the nearest unexplored edge, looks,
+        and the edge moves out. The swarm stays compact, so the mesh stays connected, and no
+        drone ever flies into space the map has not cleared."""
+        for r in self.drones:
+            if r.scout_tile is not None and r.mode != SURVEY:
+                r.scout_tile = None  # went home, crashed...: the tile is up for grabs again
+        fr, unknown = self._scout_frontiers()
+        zs = float(self.cfg.scout_alt)
+        enroute = {r.scout_tile for r in self.drones if r.scout_tile is not None}
+        tiles = {}
+        for x, y in np.argwhere(fr):
+            tiles.setdefault((int(x) // SCOUT_TILE, int(y) // SCOUT_TILE), []).append((int(x), int(y)))
+        cands = []
+        for key, cells in tiles.items():
+            if len(cells) < 2 or key in enroute or self.scout_fail.get(key, -1) > t:
+                continue
+            c = min(cells, key=lambda c: (c[0] - self.base[0]) ** 2 + (c[1] - self.base[1]) ** 2)
+            cands.append((float(np.hypot(c[0] - self.base[0], c[1] - self.base[1])), key, c))
+        cands.sort()
+        free_drones = [r for r in self.drones if r.mode == WAIT and not self.lost(r, t) and not r.grounded
+                       and r.scout_tile is None and t >= r.scout_ready_t and r.pos[2] > 2.0]
+        busy = bool(enroute) or any(r.mode in (TAKEOFF, IDLE) and not r.survey_done for r in self.drones)
+        if not cands:
+            self.scout_idle_since = self.scout_idle_since if (self.scout_idle_since is not None and not enroute) \
+                else (t if not enroute else None)
+            return
+        self.scout_idle_since = None
+        if not free_drones:
+            return
+        cands = cands[:max(len(free_drones) * 3, 6)]
+        cost = np.array([[0.7 * c[0] + 0.5 * float(np.hypot(c[2][0] - r.pos[0], c[2][1] - r.pos[1])) for c in cands]
+                         for r in free_drones])
+        rows, cols = linear_sum_assignment(cost)
+        for i, j in sorted(zip(rows, cols), key=lambda ij: cost[ij]):
+            r, (_, key, (cx, cy)) = free_drones[i], cands[j]
+            look = unknown[max(cx - 6, 0):cx + 7, max(cy - 6, 0):cy + 7]
+            ux, uy = np.nonzero(look)
+            if len(ux):
+                yaw = float(np.arctan2(uy.mean() + max(cy - 6, 0) - cy, ux.mean() + max(cx - 6, 0) - cx))
+            else:
+                yaw = float(np.arctan2(cy - self.base[1], cx - self.base[0]))
+            goal = (cx + 0.5, cy + 0.5, zs)
+            path = self._path_cells(r.pos, goal, strict=True, max_exp=60000)
+            if path is None:
+                self.scout_fail[key] = t + 40.0
+                continue
+            r.path = path
+            r.yaws = self._fill_yaws(r.pos, path, [None] * (len(path) - 1) + [yaw])
+            r.speed, r.scout_tile = 2.4, key
+            self._set_mode(r, SURVEY, t)
 
     def _plan_scout(self, offset: float = 0.0, alt: float | None = None) -> list[list]:
         """Lanes across the whole site at low altitude: the forward camera sees walls and roof
@@ -387,6 +468,8 @@ class MasterController:
             self._dispatch_investigations(t)
             self._assign_entries(t)
             self._allocate(t)
+        if self.phase == "scout":
+            self._assign_scout(t)
         if self.phase in ("scout", "survey", "interior", "verify"):
             self._plan_relays(t)
         self._check_paths(t)
@@ -461,6 +544,10 @@ class MasterController:
         elif r.task is not None:
             self.unreachable[r.task] = t + 20.0
             r.task, r.task_vantage, r.arrived_t, r.path = None, None, None, []
+        elif r.mode == SURVEY and r.scout_tile is not None:
+            self.scout_fail[r.scout_tile] = t + 60.0  # something there the map does not show
+            r.scout_tile, r.path = None, []
+            self._set_mode(r, WAIT, t)
 
     def _fail_entry(self, r: DroneRecord, t: float, why: str) -> None:
         """An attempt at an opening failed: back off, avoid it for a while, retire it after
@@ -485,6 +572,8 @@ class MasterController:
         free = m.grid(m.free)
         occ = m.grid(m.occupied)
         passable = free | (self.outdoor & ~occ)
+        if self.phase == "scout":
+            passable = free & ~occ  # unseen space may hold a wall: scouts fly only where the map says it is clear
         passable[:, :, 0] = False
         self.keep = self._keepout() if self.phase in ("scout", "survey") else None
         if self.keep is not None:
@@ -570,6 +659,8 @@ class MasterController:
                         r.leg["done"], r.leg["owner"], r.leg = True, None, None
                     self._set_mode(r, WAIT, t)
                     r.path = []
+                    if self.phase == "scout":  # at the frontier: look, let the map catch up, then move on
+                        r.scout_tile, r.scout_ready_t = None, t + SCOUT_LOOK_S
                     if self._open_legs() and self.phase in ("scout", "survey", "interior", "verify"):
                         self._start_survey_leg(r, t)  # straight on to the next leg: no waiting
                 elif r.mode == ENTER:
@@ -600,22 +691,17 @@ class MasterController:
                     self._takeoff(r, t)
 
         if self.phase == "scout":
-            done = all(g["done"] for g in self.legs)
-            if (done and t - self.phase_since > 10) or t - self.phase_since > 240:
+            explored = self.scout_idle_since is not None and t - self.scout_idle_since > 8.0
+            if (explored and t - self.phase_since > 10) or t - self.phase_since > self.cfg.scout_max_s:
                 if self.env_known:
                     self.phase, self.phase_since = "survey", t
                     self._begin_legs(self._plan_survey())
                     self.entry_change_t = t
-                    self._event(t, f"Building found: about {self.x1 - self.x0} x {self.y1 - self.y0} m, "
+                    self._event(t, f"Site explored, building found: about {self.x1 - self.x0} x {self.y1 - self.y0} m, "
                                    f"{self.top} m high. Surveying its whole exterior before anyone goes in", "success")
-                elif self.scout_attempts < 1:  # nothing yet: a second, offset sweep at roof height
-                    self.scout_attempts += 1
-                    self._begin_legs(self._plan_scout(offset=8.0, alt=12.0))
-                    self.phase_since = t
-                    self._event(t, "No building found yet: sweeping again, offset and higher", "warn")
                 else:
                     self.phase = "complete"
-                    self._event(t, "No building found on this site: recalling swarm", "error")
+                    self._event(t, "Site explored: no building found. Recalling swarm", "error")
                     for r in self.drones:
                         if r.mode in WORKING:
                             self._go_home(r, t)
@@ -1310,6 +1396,9 @@ class MasterController:
                     r.path, r.task, r.task_vantage = [], None, None
                     if r.mode == SURVEY:  # a leg it can't fly: written off, not retried
                         r.survey_done = True
+                        if r.scout_tile is not None:
+                            self.scout_fail[r.scout_tile] = t + 40.0
+                            r.scout_tile = None
                         if r.leg is not None:
                             r.leg["done"], r.leg["owner"], r.leg = True, None, None
                         self._set_mode(r, WAIT, t)
