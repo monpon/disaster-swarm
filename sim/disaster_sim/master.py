@@ -35,7 +35,7 @@ from .estimation import SimulatedDepthNet, SimulatedVIO
 from .packets import FramePacket, ImuPacket, StickCommand
 from .pilot import Pilot
 from .config import SimConfig
-from .planner3d import NavGrid, to_waypoints
+from .planner3d import NavGrid, RustNavGrid, to_waypoints
 from .smoothing import Smoother
 from .surface import Surface
 from .radio import NOISE_DBM, SLAB_DB, TX_DBM, WALL_DB, capacity_for, path_loss_db
@@ -84,6 +84,11 @@ LEASH_TAU = 3.0  # s ahead the motion filter looks
 RELAY_SETTLE_S = 10.0  # a relay on station this long without restoring contact -> chain another
 
 _SIX = ndimage.generate_binary_structure(3, 1)
+
+
+def _dilate(mask: np.ndarray, iters: int) -> np.ndarray:
+    import gpucore
+    return gpucore.dilate(np.ascontiguousarray(mask, dtype=np.uint8), iters).astype(bool)
 _DIRS = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]])
 
 
@@ -933,6 +938,10 @@ class MasterController:
         r.stage, r.stage_since = "backoff", t
         r.servo_start = None
 
+    def _dil6(self, mask: np.ndarray) -> np.ndarray:
+        """6-neighbour binary dilation (native when the Rust core is in use)."""
+        return _dilate(mask, 1) if self.core is not None else ndimage.binary_dilation(mask, _SIX)
+
     def _build_nav(self, t: float = 0.0) -> None:
         m = self.map
         free = m.grid(m.free)
@@ -945,8 +954,12 @@ class MasterController:
         self.penalty = {c: x for c, x in self.penalty.items() if x > t}
         for x, y, z in self.penalty:  # places where a drone got stuck
             passable[max(x - 1, 0):x + 2, max(y - 1, 0):y + 2, max(z - 1, 0):z + 2] = False
-        self.nav = NavGrid(passable, occ)
-        self.near_occ = ndimage.binary_dilation(occ, iterations=2)
+        if self.core is not None:  # native planner (Rust): A* and the dilations
+            self.nav = RustNavGrid(passable, occ)
+            self.near_occ = _dilate(occ, 2)
+        else:
+            self.nav = NavGrid(passable, occ)
+            self.near_occ = ndimage.binary_dilation(occ, iterations=2)
 
     def _keepout(self) -> np.ndarray:
         """Space the exterior phases must stay out of: the building (the estimated footprint
@@ -1446,10 +1459,11 @@ class MasterController:
         free = m.grid(m.free)
         occ = m.grid(m.occupied)
         unknown = ~free & ~occ
-        frontier = free & self.interior & ndimage.binary_dilation(unknown, _SIX) & ~self.ignore
+        frontier = free & self.interior & self._dil6(unknown) & ~self.ignore
         low_q = m.grid(m.quality < m.q.threshold)
-        surface = occ & self.interior & low_q & ndimage.binary_dilation(free, _SIX) & ~self.ignore
-        exposed = occ & self.interior & ~low_q & ndimage.binary_dilation(free, _SIX) & ~self.ignore & ~self.verified
+        free_d = self._dil6(free)
+        surface = occ & self.interior & low_q & free_d & ~self.ignore
+        exposed = occ & self.interior & ~low_q & free_d & ~self.ignore & ~self.verified
         weak = (m.grid(m.npass) < VERIFY_NPASS) | (m.grid(m.vres) > VERIFY_RESID)
         verify = exposed & weak
         targets = []

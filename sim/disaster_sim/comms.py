@@ -24,19 +24,26 @@ M_MIN = 16.0  # planned positions must predict at least this much
 
 
 class LinkModel:
-    """Predicted SNR from the master's map (walls = occupied runs), computed on the GPU: pairwise
-    queries in batches, and a coverage field over the whole site for 'is this place covered'."""
+    """Predicted SNR from the master's map (walls = occupied runs): pairwise queries in batches and a
+    coverage field over the whole site for 'is this place covered'. Runs on the Rust core when in use
+    (one kernel per query), else as torch ops on the GPU."""
 
-    def __init__(self, vmap: VoxelMap):
+    def __init__(self, vmap):
         self.map = vmap
+        self.rust = getattr(vmap, "rust", False)
         self.world: World | None = None
         self.field = CoverageField(vmap.shape)
         self._interior_id = None
         self._interior_t = None
 
     def refresh(self, interior: np.ndarray) -> None:
-        """Snapshot the map (call once per master tick): no copy, the tensors are the map's."""
+        """Snapshot the map (call once per master tick)."""
         m = self.map
+        if self.rust:
+            if self._interior_id is not id(interior):
+                m.core.set_interior(np.ascontiguousarray(interior, dtype=np.uint8))
+                self._interior_id = id(interior)
+            return
         if self._interior_id is not id(interior):
             self._interior_t = torch.as_tensor(interior.reshape(-1), device=DEV)
             self._interior_id = id(interior)
@@ -45,15 +52,17 @@ class LinkModel:
 
     def snr_many(self, a, b) -> np.ndarray:
         """SNR (dB) for P pairs of points (numpy (P,3) each)."""
-        ta = torch.as_tensor(np.asarray(a, dtype=np.float32), device=DEV).reshape(-1, 3)
-        tb = torch.as_tensor(np.asarray(b, dtype=np.float32), device=DEV).reshape(-1, 3)
-        return snr_pairs(self.world, ta, tb).cpu().numpy()
+        a32 = np.ascontiguousarray(np.asarray(a, dtype=np.float32).reshape(-1, 3))
+        b32 = np.ascontiguousarray(np.asarray(b, dtype=np.float32).reshape(-1, 3))
+        if self.rust:
+            return np.asarray(self.map.core.link_snr(a32, b32, 1))
+        return snr_pairs(self.world, torch.as_tensor(a32, device=DEV), torch.as_tensor(b32, device=DEV)).cpu().numpy()
 
     def snr(self, a: np.ndarray, b: np.ndarray) -> float:
         return float(self.snr_many(np.asarray(a)[None, :], np.asarray(b)[None, :])[0])
 
     def update_coverage(self, nodes: list[np.ndarray], now: float) -> None:
-        self.field.update(self.world, nodes, now)
+        self.field.update(self.snr_many, nodes, now)
 
     def margin_at(self, p: np.ndarray, nodes=None) -> float:
         """Predicted signal at p from the backbone nodes of the last `update_coverage`."""

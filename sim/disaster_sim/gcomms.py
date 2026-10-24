@@ -86,8 +86,9 @@ def _snr_chunk(world: World, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 class CoverageField:
     """Predicted best signal from a set of backbone nodes to every vertex of a coarse lattice
-    (4 m horizontally, 3 m vertically): `covered(p)` asks whether a point is inside coverage.
-    Per-node fields are cached and only recomputed when a node moves or the map ages."""
+    (4 m horizontally, 3 m vertically): `margin(p)` is how well covered a point is. Per-node fields
+    are cached and only recomputed when a node moves or the map ages. `snr(a, b)` takes numpy
+    (P,3) arrays and returns (P,) SNR in dB."""
 
     DX, DZ = 4.0, 3.0
 
@@ -97,12 +98,12 @@ class CoverageField:
         self.ys = np.arange(0, sy + self.DX, self.DX)
         self.zs = np.arange(0, sz + self.DZ, self.DZ)
         gx, gy, gz = np.meshgrid(self.xs, self.ys, self.zs, indexing="ij")
-        self.verts = torch.as_tensor(np.stack([gx, gy, gz], -1).reshape(-1, 3), dtype=torch.float32, device=DEV)
+        self.verts = np.stack([gx, gy, gz], -1).reshape(-1, 3).astype(np.float32)
         self.shape = (len(self.xs), len(self.ys), len(self.zs))
-        self.cache: dict[tuple, tuple] = {}  # node key -> (position, time, field tensor)
+        self.cache: dict[tuple, tuple] = {}  # node key -> (position, time, field)
         self.best = None  # (nx,ny,nz) numpy, max over nodes
 
-    def update(self, world: World, nodes: list[np.ndarray], now: float, max_age: float = 3.0) -> None:
+    def update(self, snr, nodes: list[np.ndarray], now: float, max_age: float = 3.0) -> None:
         keep, fields = {}, []
         for i, node in enumerate(nodes):
             node = np.asarray(node, dtype=float)
@@ -112,19 +113,16 @@ class CoverageField:
                     hit = (key, pos, tm, fld)
                     break
             if hit is None:
-                src = torch.as_tensor(node, dtype=torch.float32, device=DEV)[None, :].expand(len(self.verts), 3)
-                fld = snr_pairs(world, src, self.verts)
-                key, pos, tm = (len(self.cache), now, i), node, now
+                src = np.repeat(node.astype(np.float32)[None, :], len(self.verts), 0)
+                fld = snr(src, self.verts)
+                key = (len(self.cache), now, i)
                 while key in self.cache or key in keep:
                     key = (key[0] + 1, now, i)
-                hit = (key, pos, tm, fld)
+                hit = (key, node, now, fld)
             keep[hit[0]] = (hit[1], hit[2], hit[3])
             fields.append(hit[3])
         self.cache = keep
-        if fields:
-            self.best = torch.stack(fields).amax(0).view(self.shape).cpu().numpy()
-        else:
-            self.best = np.full(self.shape, -100.0)
+        self.best = np.max(np.stack(fields), axis=0).reshape(self.shape) if fields else np.full(self.shape, -100.0)
 
     def margin(self, p: np.ndarray) -> float:
         """Worst predicted signal among the lattice vertices around p (conservative)."""

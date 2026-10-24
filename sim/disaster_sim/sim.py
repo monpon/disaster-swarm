@@ -45,7 +45,7 @@ class Simulation:
         self.esp = EspFleet(n, self.rng)
         self.core = make_core(self.b, cfg) if rustcore.AVAILABLE else None
         self.camera = RustCamera(self.core, self.b, cfg, self.rng) if self.core is not None else RGBDCamera(self.b, cfg, self.rng)
-        self.radio = Radio(self.b, cfg, self.rng)
+        self.radio = Radio(self.b, cfg, self.rng, self.core)
         self.master = MasterController(cfg, self.b.vox.shape,
                                        (self.b.x0, self.b.y0, self.b.x1, self.b.y1, self.b.top) if cfg.known_outline else None,
                                        self.pads, self.b.base, np.random.default_rng(cfg.seed + 2000), core=self.core)

@@ -79,7 +79,8 @@ class Route:
 
 
 class Radio:
-    def __init__(self, building: Building, cfg: SimConfig, rng: np.random.Generator):
+    def __init__(self, building: Building, cfg: SimConfig, rng: np.random.Generator, core=None):
+        self.core = core
         self.b = building
         self.cfg = cfg
         self.rng = rng
@@ -112,12 +113,16 @@ class Radio:
         k = len(nodes)
         up = np.r_[True, np.asarray(alive, dtype=bool)]
         # every pair of nodes through the true building, in one GPU kernel
-        if self._world is None:
+        if self._world is None and self.core is None:
             self._world = self._make_world()
         from .gcomms import snr_pairs
         ii, jj = np.triu_indices(k, 1)
-        tn = torch.as_tensor(nodes, dtype=torch.float32, device=DEV)
-        snr_p = snr_pairs(self._world, tn[torch.as_tensor(ii, device=DEV)], tn[torch.as_tensor(jj, device=DEV)]).cpu().numpy()
+        if self.core is not None:  # one kernel for every pair
+            snr_p = np.asarray(self.core.link_snr(np.ascontiguousarray(nodes[ii], dtype=np.float32),
+                                                  np.ascontiguousarray(nodes[jj], dtype=np.float32), 0))
+        else:
+            tn = torch.as_tensor(nodes, dtype=torch.float32, device=DEV)
+            snr_p = snr_pairs(self._world, tn[torch.as_tensor(ii, device=DEV)], tn[torch.as_tensor(jj, device=DEV)]).cpu().numpy()
         use = up[ii] & up[jj]
         cap = np.zeros((k, k))
         snr_m = np.full((k, k), -100.0)

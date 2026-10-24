@@ -10,6 +10,8 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+mod nav;
+
 const MAX_BATCH: usize = 32; // frames processed per call
 const PCAP: usize = 6_000_000; // point store capacity (the last slot is reserved)
 const SURV_CAP: usize = 64;
@@ -84,6 +86,9 @@ struct Core {
     seen_sent: CudaSlice<f32>,
     pos_c: CudaSlice<f32>, rot_c: CudaSlice<f32>, ares: CudaSlice<f32>, clear: CudaSlice<f32>,
     surv: CudaSlice<f32>, surv_n: CudaSlice<i32>, cone: Option<CudaSlice<i32>>, ncone: i32,
+    interior: CudaSlice<u8>,
+    per_mat: CudaSlice<f32>,
+    nmat: i32,
     frame_ctr: u32,
     batch_ctr: i32,
     sm_off: i32,
@@ -118,17 +123,17 @@ impl Core {
         let s = ctx.default_stream();
         let src = [
             include_str!("common.cuh"), include_str!("camera.cu"), include_str!("map.cu"),
-            include_str!("align.cu"), include_str!("smooth.cu"), include_str!("stream.cu"),
+            include_str!("align.cu"), include_str!("smooth.cu"), include_str!("stream.cu"), include_str!("comms.cu"),
         ]
         .join("\n");
         let opts = CompileOptions { fmad: Some(false), arch: Some("compute_80"), ..Default::default() };
         let ptx = compile_ptx_with_opts(src, opts).map_err(err)?;
         let module = ctx.load_module(ptx).map_err(err)?;
-        let names: [&'static str; 26] = [
+        let names: [&'static str; 27] = [
             "render", "degrade_a", "degrade_b", "depthnet", "k_carve", "k_hit", "k_apply", "k_pts_claim", "k_pts_acc",
             "k_pts_fin", "k_align", "k_apply_align", "k_scale_est", "k_clear_ahead", "k_sm_collect", "k_sm_a", "k_sm_b",
             "k_sm_c", "k_sm_d", "k_redirty", "k_vox_collect", "k_vox_pack", "k_pt_cand", "k_pt_decide", "k_pt_pack",
-            "k_seen_collect",
+            "k_seen_collect", "k_snr",
         ];
         let mut k = HashMap::new();
         for name in names.iter() {
@@ -181,6 +186,7 @@ impl Core {
             seen_sent: s.clone_htod(&neg1_f(nv)).map_err(err)?,
             pos_c: z!(s, f32, MAX_BATCH * 3), rot_c: z!(s, f32, MAX_BATCH * 9), ares: z!(s, f32, MAX_BATCH * 24),
             clear: z!(s, f32, MAX_BATCH), surv: z!(s, f32, SURV_CAP * 6), surv_n: z!(s, i32, 1), cone: None, ncone: 0,
+            interior: z!(s, u8, nv), per_mat: z!(s, f32, 16), nmat: colors.shape()[0] as i32,
             frame_ctr: 1, batch_ctr: 0, sm_off: 0,
             stream: s,
         })
@@ -651,6 +657,43 @@ impl Core {
         Ok(d)
     }
 
+    /// Loss (dB) per material for a run of solid cells crossed by a link (index = material id).
+    fn set_link_params(&mut self, per_mat: Vec<f32>) -> R<()> {
+        let mut v = per_mat;
+        v.resize(16, 0.0);
+        self.stream.memcpy_htod(&v, &mut self.per_mat).map_err(err)
+    }
+
+    /// The building's interior (unexplored interior counts against predicted links).
+    fn set_interior(&mut self, a: PyReadonlyArray3<u8>) -> R<()> {
+        let v: Vec<u8> = a.as_array().iter().copied().collect();
+        self.stream.memcpy_htod(&v, &mut self.interior).map_err(err)
+    }
+
+    /// SNR (dB) for P links a[i] -> b[i]; mode 0 = the true building, 1 = the master's map.
+    fn link_snr<'py>(&self, py: Python<'py>, a: PyReadonlyArray2<f32>, b: PyReadonlyArray2<f32>, mode: i32) -> R<Bound<'py, numpy::PyArray1<f32>>> {
+        let p = a.shape()[0];
+        let s = &self.stream;
+        if p == 0 {
+            return Ok(Vec::<f32>::new().into_pyarray(py));
+        }
+        let da = s.clone_htod(&vec2(&a)).map_err(err)?;
+        let db = s.clone_htod(&vec2(&b)).map_err(err)?;
+        let mut out = z!(s, f32, p);
+        let pi = p as i32;
+        let dims = self.dims;
+        unsafe {
+            s.launch_builder(&self.k["k_snr"])
+                .arg(&mode).arg(&self.world).arg(&self.wdim[0]).arg(&self.wdim[1]).arg(&self.wdim[2]).arg(&self.pad)
+                .arg(&dims).arg(&self.lo).arg(&self.mat).arg(&self.interior)
+                .arg(&da).arg(&db).arg(&pi).arg(&self.per_mat).arg(&self.nmat).arg(&mut out)
+                .launch(cfg(p)).map_err(err)?;
+        }
+        let v = s.clone_dtoh(&out).map_err(err)?;
+        s.synchronize().map_err(err)?;
+        Ok(v.into_pyarray(py))
+    }
+
     fn sync(&self) -> R<()> {
         self.stream.synchronize().map_err(err)
     }
@@ -659,5 +702,7 @@ impl Core {
 #[pymodule]
 fn gpucore(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Core>()?;
+    m.add_class::<nav::Nav>()?;
+    m.add_function(wrap_pyfunction!(nav::dilate, m)?)?;
     Ok(())
 }

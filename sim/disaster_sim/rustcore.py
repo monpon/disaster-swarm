@@ -36,6 +36,9 @@ def make_core(building, cfg):
                         float(cfg.scan_near), float(cfg.cam_range), float(q.threshold))
     az = np.arctan2(k.body_rays[:, 1], k.body_rays[:, 0])
     el = np.arctan2(k.body_rays[:, 2], np.hypot(k.body_rays[:, 0], k.body_rays[:, 1]))
+    from .radio import GLASS_DB, GROUND_DB, SLAB_DB, WALL_DB
+    core.set_link_params([GROUND_DB if m == M.ASPHALT else GLASS_DB if m == M.GLASS else SLAB_DB if m in (M.FLOOR, M.ROOF) else WALL_DB
+                          for m in range(M.N_MATERIALS)])
     core.set_cone(np.flatnonzero((np.abs(az) < 0.26) & (np.abs(el) < 0.2)).astype(np.int32))
     return core
 
