@@ -36,6 +36,21 @@ the protocol, so one lost chunk (about 7 per frame) loses the frame: 5% packet l
 An earlier S3 v2 run with `readinto` produced 0% intact frames. That was a bug: MicroPython's `readinto` keeps
 reading until the buffer is full, concatenating datagrams. Do not use it for UDP.
 
+## 3b. Throughput ceilings (1472-byte UDP datagrams)
+
+What the drone needs: 190 to 300 datagrams/s, 240 to 420 KiB/s of video (direct runs), plus 40 RC packets/s.
+
+| Path | Result | Notes |
+|---|---|---|
+| Python relay, laptop loopback (`scripts/bench_relay.py`) | 16,000 pkt/s, 22 MiB/s, 0.2% loss | software ceiling, no radio, laptop CPU. 50x the drone's rate. Not measured on a Pi 3. |
+| S3 AP, laptop to S3 (`scripts/s3_bench.sh`) | 0% loss to 250 pkt/s (360 KiB/s); 1.7% at 500; 8% at 1000; saturates near 900 pkt/s (1.3 MiB/s) | AP-only, MicroPython sink. Excludes the drone leg and AP + STA contention. |
+| S3 AP, S3 to laptop | 2,200 pkt/s, 3.1 MiB/s, 0% loss of what it sent | 7,561 send errors: the S3 saturates its own transmit buffers |
+
+Reading: the S3 receive path is lossless only up to about 250 pkt/s, which is the drone's own rate (190 to 300 pkt/s,
+in bursts). That fits the frame loss seen when the S3 receives from the drone (hypothesis: receive-queue overflow),
+and it means the receive side, not the transmit side, is the S3's weak point. The real relay also splits one radio
+between the drone link and the AP, so its ceiling is lower than these AP-only numbers.
+
 ## 4. Approaches compared
 
 | | Pi 3 + Python relay | ESP32-S3 MicroPython | Raspberry Pi Pico 2 W |
@@ -82,4 +97,6 @@ PYTHONPATH=. python tests/test_relay.py              # loopback end to end, no h
 scripts/wifi_cycle.sh -- env PYTHONPATH=. python probe.py --seconds 10   # direct baseline
 scripts/relay_real_test.sh                           # Python relay to the real drone
 scripts/s3_relay_test.sh 10                          # S3 relay (see esp32/README.md)
+PYTHONPATH=. python scripts/bench_relay.py            # Python relay ceiling, loopback
+scripts/s3_bench.sh                                  # S3 AP throughput (no drone needed)
 ```
