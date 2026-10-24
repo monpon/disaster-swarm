@@ -1,0 +1,8 @@
+# Copy to /etc/drone-repeater.conf on the Pi and edit.
+DRONE_SSID="WIFI_8K__cc220c"     # drone AP: the Pi joins this on STA_IF, and re-advertises it on AP_IF
+STA_IF=wlan0                     # onboard radio, client of the drone
+AP_IF=ap0                        # virtual AP interface created on the same radio (single-radio mode)
+AP_ADDR=192.168.5.1/24           # Pi address on the AP side; clients get 192.168.5.10-100
+DRONE_IP=192.168.4.153
+RELAY_VIDEO_PORT=18080
+RELAY_CMD_PORT=18090
