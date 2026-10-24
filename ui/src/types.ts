@@ -98,7 +98,7 @@ export interface DroneState {
 
 export interface Metrics {
   t: number;
-  phase: "scout" | "survey" | "interior" | "verify" | "complete";
+  phase: "scout" | "operate" | "verify" | "complete";
   explored: number;
   scanned: number;
   entries: number;
@@ -120,6 +120,8 @@ export interface Metrics {
   align_ok: number; // fraction of frames the master registered against its map
   align_mm: number; // mean size of that correction (mm)
   points: number;
+  brakes: number; // emergency brakes from the live frame
+  first_inside: number | null; // sim time the first drone got inside
   lost_events: number; // times a drone lost contact
   slots: number; // relay posts planned
   thumbs: number; // frames sent as thumbnails instead of dropped

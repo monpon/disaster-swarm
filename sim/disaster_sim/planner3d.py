@@ -86,8 +86,10 @@ class NavGrid:
             return False
         return bool(self.passable[pts[:, 0], pts[:, 1], pts[:, 2]].all())
 
-    def astar(self, start, goal, max_expansions: int = 25000):
-        """Voxel path from start to goal (pruned to line-of-sight waypoints), or None."""
+    def astar(self, start, goal, max_expansions: int = 25000, partial: bool = False):
+        """Voxel path from start to goal (pruned to line-of-sight waypoints), or None. With
+        `partial`, an unreachable goal gives the path to the reachable cell nearest to it (go as
+        far as the known-clear space allows, look, then continue)."""
         s = self.nearest_ok(start)
         g = self.nearest_ok(goal)
         if s is None or g is None:
@@ -110,15 +112,19 @@ class NavGrid:
         best = {sf: 0.0}
         parent = {sf: -1}
         exp = 0
+        near_f, near_h = sf, h(sf)
         while openh:
             _, gc, cur = heapq.heappop(openh)
             if cur == gf:
                 break
             if gc > best[cur]:
                 continue
+            hc = h(cur)
+            if hc < near_h:
+                near_f, near_h = cur, hc
             exp += 1
             if exp > max_expansions:
-                return None
+                break
             x, r = divmod(cur, syz)
             y, z = divmod(r, sz)
             for off, dx, dy, dz, c in offs:
@@ -138,7 +144,9 @@ class NavGrid:
                     parent[nf] = cur
                     heapq.heappush(openh, (ng + h(nf), ng, nf))
         if gf not in parent:
-            return None
+            if not partial or near_f == sf:
+                return None
+            gf = near_f  # as close as the cleared space gets
         path = [gf]
         while parent[path[-1]] != -1:
             path.append(parent[path[-1]])

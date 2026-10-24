@@ -67,6 +67,7 @@ class SimConfig:
     scout_alt: float = 6.0
     scout_spacing: float = 16.0
     scout_max_s: float = 600.0  # cap on scouting the site
+    operate_max_s: float = 1500.0  # cap on the main mapping phase
     survey_max_s: float = 600.0  # cap on the exterior survey before going in regardless
 
     # Multi-pass mapping.

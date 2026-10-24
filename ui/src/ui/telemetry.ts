@@ -18,10 +18,9 @@ function linkColor(mbps: number): string {
 
 const PHASE_LABEL: Record<string, string> = {
   scout: "0 · SCOUTING SITE",
-  survey: "1 · EXTERIOR SURVEY",
-  interior: "2 · INTERIOR SCAN",
-  verify: "3 · VERIFY PASS",
-  complete: "4 · COMPLETE",
+  operate: "1 · MAPPING",
+  verify: "2 · VERIFY PASS",
+  complete: "3 · COMPLETE",
 };
 
 /** Header metrics, fleet table, selected-drone card and event log. */
@@ -37,7 +36,7 @@ export class Telemetry {
   metrics(m: Metrics): void {
     $("m-time").textContent = fmtTime(m.t);
     $("m-phase").textContent = (PHASE_LABEL[m.phase] ?? m.phase) +
-      (m.phase === "survey" ? ` · ${(m.ext_cov * 100).toFixed(0)}% seen` : "");
+      (m.phase === "operate" ? ` · outside ${(m.ext_cov * 100).toFixed(0)}% seen` : "");
     $("m-entries").textContent = `${m.entries_usable}/${m.entries}`;
     $("m-explored").textContent = `${(m.explored * 100).toFixed(1)}%`;
     $("m-scanned").textContent = `${(m.scanned * 100).toFixed(1)}%`;

@@ -264,6 +264,8 @@ class Simulation:
             "align_mm": round(1000 * float(np.mean(self.master.align_dp or [0.0])), 0),
             "points": int(self.master.map.npts),
             "prof": {k: round(v, 2) for k, v in self.prof.items()},
+            "brakes": int(self.master.brakes),
+            "first_inside": None if self.master.first_inside_t is None else round(float(self.master.first_inside_t), 1),
             "lost_events": int(self.master.lost_events),
             "slots": len(self.master.slots),
             "thumbs": int(self.radio.stats["thumbs"]),
