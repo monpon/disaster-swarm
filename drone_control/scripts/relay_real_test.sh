@@ -7,7 +7,7 @@ body() {
   local jl=/tmp/relay_real.jsonl; rm -f "$jl"
   local ip; ip=$(ip -4 -o addr show "${IFACE:-wlan0}" | awk '{print $4}' | cut -d/ -f1)
   python -m relay --listen-ip 127.0.0.1 --listen-video-port 18080 --listen-cmd-port 18090 \
-      --upstream-bind "$ip" --telemetry-jsonl "$jl" --fake-imu >/tmp/relay_real.log 2>&1 &
+      --upstream-bind "$ip" --telemetry-jsonl "$jl" --fake-imu ${RELAY_ARGS:-} >/tmp/relay_real.log 2>&1 &
   local rp=$!
   sleep 1
   timeout 30 python probe.py --ip 127.0.0.1 --video-port 18080 --cmd-port 18090 --seconds "${SECONDS_TEST:-6}"

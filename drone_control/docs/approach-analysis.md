@@ -51,6 +51,27 @@ in bursts). That fits the frame loss seen when the S3 receives from the drone (h
 and it means the receive side, not the transmit side, is the S3's weak point. The real relay also splits one radio
 between the drone link and the AP, so its ceiling is lower than these AP-only numbers.
 
+## 3c. Downscaling video in the relay
+
+`relay --downscale WxH --jpeg-quality Q` reassembles each JPEG frame, shrinks it, and re-chunks it in the drone's own
+packet format (`relay/transcode.py`), so clients decode it unchanged. The drone link still carries full-size frames.
+
+Measured fact: the drone's frames are already **240x320 (portrait), about 11.3 KB each**, so a 320x240 target does not
+reduce the pixel count (it also swaps the aspect ratio and distorts). Real drone, Python relay on the laptop, 10 s:
+
+| Output | Bytes/frame | Client KiB/s | Frames intact | fps | Transcode per frame (laptop) |
+|---|---|---|---|---|---|
+| native, direct to drone | 11,400 | 275 | 100% | 24.6 | n/a |
+| 320x240, q60 (as requested) | 7,065 | 170 | 100% | 24.6 | 4.1 ms |
+| 240x320, q35 | 5,583 | 135 | 100% | 24.6 | 1.6 ms |
+| 120x160, q50 | 2,714 | 65 | 100% | 24.5 | 0.8 ms |
+
+The savings come from re-encoding at lower quality, not from the resolution change. Smaller output only helps the
+client leg: the drone still sends 11 KB frames to the relay. It does not fix the S3 receive loss. Frame budget at 24.6 fps
+is 41 ms. Laptop transcode times will be several times slower on a Pi 3 (estimate, not measured).
+
+Not done: the same benchmark on a Pi 3 (the SD card has not been flashed, so no Pi is available yet).
+
 ## 4. Approaches compared
 
 | | Pi 3 + Python relay | ESP32-S3 MicroPython | Raspberry Pi Pico 2 W |

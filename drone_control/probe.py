@@ -7,6 +7,7 @@ import time
 
 from drone_link import DroneLink
 from drone_link.video import FrameStats
+from relay.transcode import FrameAssembler, jpeg_size
 from drone_link.packets import DRONE_IP
 
 
@@ -25,7 +26,14 @@ def main() -> int:
 
     link = DroneLink(a.ip, a.rate, a.mode, a.video_port, a.cmd_port)
     frames = FrameStats()
-    link.on_video_datagram = frames.feed
+    asm, dims = FrameAssembler(), {"sizes": set(), "n": 0, "bytes": 0}
+
+    def on_video(pkt):
+        frames.feed(pkt)
+        done = asm.feed(pkt)
+        if done:
+            dims["sizes"].add(jpeg_size(done[0])); dims["n"] += 1; dims["bytes"] += len(done[0])
+    link.on_video_datagram = on_video
     t0 = time.monotonic()
     link.start()
     time.sleep(a.seconds)
@@ -37,6 +45,8 @@ def main() -> int:
     if s.first_rx_ts:
         print(f"first rx after {s.first_rx_ts - t0:.3f}s")
     print("frames:", frames.summary())
+    if dims["n"]:
+        print("jpeg:", sorted(dims["sizes"]), "mean", dims["bytes"] // dims["n"], "bytes/frame")
     ok = s.rx_packets > 0
     print("VERDICT:", "wifi_cam video flowing" if ok else "no video - protocol unverified")
     return 0 if ok else 1

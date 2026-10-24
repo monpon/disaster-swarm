@@ -13,6 +13,7 @@ import logging
 import time
 
 from .telemetry import Sinks, Telemetry, fake_imu_enricher, host_enricher
+from .transcode import FrameAssembler, Transcoder
 
 log = logging.getLogger("relay")
 SESSION_IDLE_S = 30.0
@@ -26,6 +27,7 @@ class Session:
         self.transport: asyncio.DatagramTransport | None = None
         self.reply_to: dict[int, tuple[str, int]] = {}  # drone port -> client addr
         self.last_seen = time.monotonic()
+        self.assembler = FrameAssembler()
 
     async def open(self) -> None:
         loop = asyncio.get_running_loop()
@@ -49,8 +51,16 @@ class _Upstream(asyncio.DatagramProtocol):
             relay.telemetry.counters["dropped_no_session"] += 1
             return
         relay.telemetry.on_down(kind, data)
-        relay.listeners[kind].sendto(data, client)
         self.s.last_seen = time.monotonic()
+        tc = relay.transcoder
+        if tc is not None and kind == "video" and len(data) > 8:
+            done = self.s.assembler.feed(data)
+            if done:
+                loop, tx = relay.loop, relay.listeners[kind]
+                tc.submit(done[0], done[1], lambda pkts: loop.call_soon_threadsafe(
+                    lambda: [tx.sendto(p, client) for p in pkts]))
+            return                                  # video is re-encoded: originals are not forwarded
+        relay.listeners[kind].sendto(data, client)
 
 
 class _Listener(asyncio.DatagramProtocol):
@@ -67,10 +77,13 @@ class _Listener(asyncio.DatagramProtocol):
 
 class Relay:
     def __init__(self, drone_ip: str, ports: dict[str, tuple[int, int]], listen_ip: str,
-                 upstream_bind: str, telemetry: Telemetry, sinks: Sinks, interval: float) -> None:
+                 upstream_bind: str, telemetry: Telemetry, sinks: Sinks, interval: float,
+                 transcoder: Transcoder | None = None) -> None:
         # ports: kind -> (listen_port, drone_port)
         self.drone_ip, self.ports, self.listen_ip = drone_ip, ports, listen_ip
         self.upstream_bind, self.telemetry, self.sinks, self.interval = upstream_bind, telemetry, sinks, interval
+        self.transcoder = transcoder
+        self.loop = None
         self.kind_by_drone_port = {dp: k for k, (_, dp) in ports.items()}
         self.listeners: dict[str, asyncio.DatagramTransport] = {}
         self.sessions: dict[str, Session] = {}
@@ -99,7 +112,7 @@ class Relay:
         return s
 
     async def run(self) -> None:
-        loop = asyncio.get_running_loop()
+        loop = self.loop = asyncio.get_running_loop()
         for kind, (lport, _) in self.ports.items():
             transport, _ = await loop.create_datagram_endpoint(
                 lambda k=kind: _Listener(self, k), local_addr=(self.listen_ip, lport))
@@ -136,16 +149,23 @@ def main() -> None:
     ap.add_argument("--telemetry-jsonl", default=None)
     ap.add_argument("--stdout", action="store_true", help="print telemetry lines")
     ap.add_argument("--interval", type=float, default=1.0)
+    ap.add_argument("--downscale", default=None, metavar="WxH", help="re-encode video to this size, e.g. 320x240")
+    ap.add_argument("--jpeg-quality", type=int, default=60)
     ap.add_argument("--fake-imu", action="store_true", help="add synthetic extra.imu to telemetry")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
     enrichers = [host_enricher] + ([fake_imu_enricher] if a.fake_imu else [])
+    tc = None
+    if a.downscale:
+        w, h = (int(x) for x in a.downscale.lower().split("x"))
+        tc = Transcoder((w, h), a.jpeg_quality)
+        enrichers.append(lambda: {"transcode": tc.summary()})
     relay = Relay(
         a.drone_ip,
         {"video": (a.listen_video_port, a.drone_video_port), "cmd": (a.listen_cmd_port, a.drone_cmd_port)},
         a.listen_ip, a.upstream_bind, Telemetry(enrichers),
-        Sinks(None if a.no_telemetry_udp else a.telemetry_udp, a.telemetry_jsonl, a.stdout), a.interval)
+        Sinks(None if a.no_telemetry_udp else a.telemetry_udp, a.telemetry_jsonl, a.stdout), a.interval, tc)
     try:
         asyncio.run(relay.run())
     except KeyboardInterrupt:
