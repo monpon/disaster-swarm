@@ -232,6 +232,13 @@ class MasterController:
         z = alt if alt is not None else self.cfg.scout_alt
         margin = 8.0
         pts = []
+        # First a lap round the edge of the site: it sees whatever stands near the boundary, so
+        # the building's far sides are found even though the lanes cannot cross it.
+        cx, cy = sx / 2, sy / 2
+        x0, x1, y0, y1 = margin, sx - margin, margin, sy - margin
+        ring = [(x, y0) for x in np.arange(x0, x1, 10.0)] + [(x1, y) for y in np.arange(y0, y1, 10.0)] \
+            + [(x, y1) for x in np.arange(x1, x0, -10.0)] + [(x0, y) for y in np.arange(y1, y0, -10.0)]
+        pts += [((float(x), float(y), float(z)), float(np.arctan2(cy - y, cx - x))) for x, y in ring]
         for j, y in enumerate(np.arange(margin + offset, sy - margin, self.cfg.scout_spacing)):
             xs = np.arange(margin, sx - margin + 1, 10.0)
             if j % 2:
@@ -742,23 +749,33 @@ class MasterController:
 
     def _start_survey_leg(self, r: DroneRecord, t: float) -> None:
         """Take the nearest open leg (or the unflown rest of one another drone had to drop)."""
-        open_ = self._open_legs()
-        if not open_:
-            r.survey_done = True
-            self._set_mode(r, WAIT, t)
-            return
-        g = min(open_, key=lambda g: float(np.linalg.norm(np.asarray(g["pts"][g["next_i"]][0]) - r.pos)))
+        while True:
+            open_ = self._open_legs()
+            if not open_:
+                r.survey_done = True
+                self._set_mode(r, WAIT, t)
+                return
+            g = min(open_, key=lambda g: float(np.linalg.norm(np.asarray(g["pts"][g["next_i"]][0]) - r.pos)))
+            pts, yaws, leg_map = [], [], []
+            prev = r.pos
+            for k in range(g["next_i"], len(g["pts"])):
+                p, yaw = g["pts"][k]
+                if self.keep is not None:
+                    c = tuple(int(np.clip(v, 0, n - 1)) for v, n in zip(np.floor(p), self.shape))
+                    if self.keep[c]:
+                        continue  # a waypoint inside the building (lanes cross it): skip it
+                hop = self._path_cells(prev, p, strict=True, max_exp=90000)  # planned around what the map shows
+                if hop is None:
+                    continue  # unreachable from here
+                pts += hop
+                yaws += [None] * (len(hop) - 1) + [yaw]
+                leg_map += [k] * len(hop)
+                prev = np.asarray(p)
+            if pts:
+                break
+            g["done"] = True  # nothing flyable left in this leg
         g["owner"] = r.id
         r.leg = g
-        pts, yaws, leg_map = [], [], []
-        prev = r.pos
-        for k in range(g["next_i"], len(g["pts"])):
-            p, yaw = g["pts"][k]
-            hop = self._path_cells(prev, p)  # planned around what the map shows, ends at p
-            pts += hop
-            yaws += [None] * (len(hop) - 1) + [yaw]
-            leg_map += [k] * len(hop)
-            prev = np.asarray(p)
         r.path, r.leg_path, r.leg_map = pts, pts, leg_map
         r.yaws = self._fill_yaws(r.pos, pts, yaws)
         r.speed = 2.4  # contact below 3 m/s bounces off the prop guards instead of crashing
@@ -813,8 +830,8 @@ class MasterController:
                     gaps.append((("roof", ax, ay), ((x0 + ax + 5, y0 + ay + 5, top + 4.0), 0.0)))
         return seen / max(total, 1), gaps
 
-    def _path_cells(self, a, b, strict: bool = False) -> list | None:
-        cells = self.nav.astar(np.floor(a), np.floor(b)) if self.nav else None
+    def _path_cells(self, a, b, strict: bool = False, max_exp: int = 25000) -> list | None:
+        cells = self.nav.astar(np.floor(a), np.floor(b), max_exp) if self.nav else None
         if cells is None and strict:
             return None
         pts = to_waypoints(cells[1:]) if cells else []
