@@ -22,3 +22,6 @@ apps/web/src/routeTree.gen.ts
 .DS_Store
 *.log
 __pycache__
+
+# Vercel
+.vercel
