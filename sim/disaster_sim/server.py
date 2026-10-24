@@ -14,6 +14,7 @@ from fastapi import Request, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from .config import SimConfig
+from .sysmon import SysMon
 from .protocol import MapStream, feed_message, state_message, world_message
 from .sim import Simulation
 
@@ -37,11 +38,14 @@ class SimServer:
         self.clients: dict[WebSocket, int | None] = {}  # socket -> selected drone (camera feed)
         self.event_idx = 0
         self.rtf = 0.0  # achieved real-time factor
+        self.mon = SysMon()
+        self.loop_ms = 0.0  # CPU time the server loop spends per tick
         self.dirty_world = False
         self.broadcasts = 0
 
     def extra(self) -> dict:
-        return {"running": self.running, "speed": self.speed, "rtf": round(self.rtf, 2)}
+        return {"running": self.running, "speed": self.speed, "rtf": round(self.rtf, 2), "sys": self.mon.data,
+                "loop_ms": round(self.loop_ms, 1)}
 
     def handle(self, ws: WebSocket, msg: dict) -> None:
         if msg.get("type") == "select":
@@ -98,6 +102,7 @@ class SimServer:
                     self.sim.step()
                     sim_debt -= self.sim.dt
                 rtf_window.append((now, self.sim.t - sim_t0))
+                self.loop_ms = self.loop_ms * 0.9 + (time.perf_counter() - t_start) * 1000 * 0.1
             else:
                 sim_debt = 0.0
                 rtf_window.append((now, 0.0))

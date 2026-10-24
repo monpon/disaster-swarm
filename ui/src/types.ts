@@ -136,6 +136,17 @@ export interface Metrics {
   running: boolean;
   speed: number;
   rtf: number;
+  loop_ms: number;
+  sys: {
+    cpu: number; // whole machine, %
+    proc_cpu: number; // this server, % of ONE core
+    mem: number; // %
+    mem_gb: number;
+    mem_total_gb: number;
+    gpu: number | null; // %
+    gpu_mem: number | null;
+    cores: number;
+  };
 }
 
 export interface MapEntry {

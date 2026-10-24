@@ -609,3 +609,12 @@ kbd {
   color: #8fd3ff;
   border-style: dashed;
 }
+
+/* Host utilisation meters: the span's background is the bar. */
+.metric.meter span {
+  display: block;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

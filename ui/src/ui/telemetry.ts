@@ -56,6 +56,19 @@ export class Telemetry {
     $("m-smoother").textContent = `${m.smoother} · ${m.smooth_ms.toFixed(0)} ms` +
       (m.mesh.backend === "off" ? "" : ` · mesh ${(m.mesh.tris / 1000).toFixed(0)}k tris`);
     $("m-link").textContent = `${m.radio_mb.toFixed(0)} MB · ${tot ? ((m.frames_dropped / tot) * 100).toFixed(1) : "0.0"}% lost`;
+    const sy = m.sys;
+    if (sy) {
+      const bar = (id: string, pct: number | null, text: string) => {
+        const el = $(id);
+        el.textContent = text;
+        const p = pct === null ? 0 : Math.max(0, Math.min(100, pct));
+        const col = p > 85 ? "rgba(255,77,79,0.45)" : p > 60 ? "rgba(255,176,32,0.4)" : "rgba(61,220,151,0.35)";
+        el.style.background = `linear-gradient(90deg, ${col} ${p}%, transparent ${p}%)`;
+      };
+      bar("m-cpu", sy.cpu, `${sy.cpu.toFixed(0)}% of ${sy.cores} cores · server ${sy.proc_cpu.toFixed(0)}% of 1 core`);
+      bar("m-mem", sy.mem, `${sy.mem_gb.toFixed(1)} / ${sy.mem_total_gb.toFixed(0)} GB (${sy.mem.toFixed(0)}%)`);
+      bar("m-gpu", sy.gpu, sy.gpu === null ? "n/a" : `${sy.gpu.toFixed(0)}% · loop ${m.loop_ms.toFixed(0)} ms/tick`);
+    }
     $("m-rtf").textContent = m.running ? `${m.rtf.toFixed(1)}× (set ${m.speed}×)` : "paused";
     const done = m.phase === "complete";
     $("status-mission").textContent = done ? "MISSION COMPLETE" : m.running ? "LIVE" : "PAUSED";
