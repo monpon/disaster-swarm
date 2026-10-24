@@ -210,13 +210,22 @@ impl Nav {
             let dy = (y - g[1]).abs() as f32;
             HEURISTIC_WEIGHT * (dx.max(dy) + 0.414 * dx.min(dy) + (z - g[2]).abs() as f32)
         };
+        // Among equal-cost routes prefer the one that hugs the straight start-goal line (the usual cross-product
+        // tie-break): grid A* otherwise picks an arbitrary staircase, and the choice flips as the map changes.
+        let (s0, s1) = (s[0], s[1]);
+        let hk = |f: i32| -> f32 {
+            let x = f / syz;
+            let y = (f % syz) / sz;
+            let cross = ((x - g[0]) * (s1 - g[1]) - (s0 - g[0]) * (y - g[1])).abs() as f32;
+            h(f) + 0.002 * cross
+        };
         self.cur_ver = self.cur_ver.wrapping_add(1);
         let ver = self.cur_ver;
         let mut open: BinaryHeap<Reverse<(F, F, i32)>> = BinaryHeap::new();
         self.ver[sf as usize] = ver;
         self.g[sf as usize] = 0.0;
         self.parent[sf as usize] = -1;
-        open.push(Reverse((F(h(sf)), F(0.0), sf)));
+        open.push(Reverse((F(hk(sf)), F(0.0), sf)));
         let (mut near_f, mut near_h) = (sf, h(sf));
         let mut exp = 0i64;
         let mut found = false;
@@ -266,7 +275,7 @@ impl Nav {
                     self.ver[nf as usize] = ver;
                     self.g[nf as usize] = ng;
                     self.parent[nf as usize] = cur;
-                    open.push(Reverse((F(ng + h(nf)), F(ng), nf)));
+                    open.push(Reverse((F(ng + hk(nf)), F(ng), nf)));
                 }
             }
         }

@@ -24,20 +24,22 @@ def make_core(building, cfg):
     from .camera import RGBDCamera
     from .voxelmap import ScanQuality
     k = Intrinsics(cfg)
-    pad = int(np.ceil(cfg.cam_range)) + 2
+    pad = 27   # out of the volume is air, so the padding only needs to cover where drones fly
     sx, sy, sz = building.vox.shape
     world = np.zeros((sx + 2 * pad, sy + 2 * pad, sz + 2 * pad), dtype=np.uint8)
     world[:, :, :pad] = M.ASPHALT
     world[pad:pad + sx, pad:pad + sy, pad:pad + sz] = building.vox
-    q = ScanQuality(cfg.scan_near, cfg.cam_range, cfg.proper_scan_range)
+    q = ScanQuality(cfg.scan_near, cfg.scan_far, cfg.proper_scan_range)
     core = gpucore.Core(world, pad, k.body_rays.astype(np.float32), cfg.cam_w, cfg.cam_h, cfg.cam_hfov_deg,
                         k.steps.astype(np.float32), 0.5, M.COLORS.astype(np.float32), (int(sx), int(sy), int(sz)),
                         M.COLORS[1:].astype(np.float32), float(min(cfg.depth_max, cfg.cam_range)),
-                        float(cfg.scan_near), float(cfg.cam_range), float(q.threshold))
+                        float(cfg.scan_near), float(cfg.scan_far), float(q.threshold),
+                        int(min(8192, max(1024, cfg.n_drones * 170))))  # frame pool: a full onboard buffer per drone
     az = np.arctan2(k.body_rays[:, 1], k.body_rays[:, 0])
     el = np.arctan2(k.body_rays[:, 2], np.hypot(k.body_rays[:, 0], k.body_rays[:, 1]))
     from .radio import GLASS_DB, GROUND_DB, SLAB_DB, WALL_DB
-    core.set_link_params([GROUND_DB if m == M.ASPHALT else GLASS_DB if m == M.GLASS else SLAB_DB if m in (M.FLOOR, M.ROOF) else WALL_DB
+    k = 0.35 if cfg.plan_assist else 1.0   # plan-assisted demo: a better indoor radio (walls and slabs cost a third as much)
+    core.set_link_params([GROUND_DB if m == M.ASPHALT else k * (GLASS_DB if m == M.GLASS else SLAB_DB if m in (M.FLOOR, M.ROOF) else WALL_DB)
                           for m in range(M.N_MATERIALS)])
     core.set_cone(np.flatnonzero((np.abs(az) < 0.26) & (np.abs(el) < 0.2)).astype(np.int32))
     return core
@@ -77,7 +79,7 @@ class RustMap:
         self.n = int(np.prod(shape))
         self.strides = np.array([shape[1] * shape[2], shape[2], 1])
         self.k = Intrinsics(cfg)
-        self.q = ScanQuality(cfg.scan_near, cfg.cam_range, cfg.proper_scan_range)
+        self.q = ScanQuality(cfg.scan_near, cfg.scan_far, cfg.proper_scan_range)
         self.frames = 0
         self.align_ok = 0
         self.align_n = 0
@@ -171,3 +173,82 @@ class RustMap:
     def gather_points(self, ids: np.ndarray) -> dict:
         d = self.core.gather_points([int(i) for i in ids])
         return {"raw": np.asarray(d["raw"]), "smooth": np.asarray(d["smooth"]), "hidden": np.asarray(d["hidden"]).astype(bool)}
+
+
+class _CountLen:
+    def __init__(self, f):
+        self._f = f
+
+    def __len__(self):
+        return self._f()
+
+
+class RustSurface:
+    """The surface mesh (TSDF fusion + marching cubes + wall snapping) as run by the Rust core. Frames are
+    fused inside `fuse`; `step` meshes dirty chunks; `updates` hands the viewer changed chunks."""
+    available = True
+    backend = "cuda"
+
+    def __init__(self, core):
+        import time
+        self._time = time
+        self.core = core
+        self.tris = 0
+        self.last_ms = 0.0
+        self.chunks = _CountLen(lambda: self._nchunks)
+        self._nchunks = 0
+
+    def add_batch(self, *a, **k) -> None:  # frames are fused by `core.fuse`
+        pass
+
+    def step(self, now: float, max_chunks: int = 400, min_interval: float = 0.0, budget_ms: int = 30) -> None:
+        t0 = self._time.perf_counter()
+        n = self.core.mesh_step(max_chunks, float(now), min_interval, int(budget_ms))
+        if n:
+            self.tris, self._nchunks = self.core.mesh_totals()
+            self.last_ms = self.last_ms * 0.8 + (self._time.perf_counter() - t0) * 1000 * 0.2
+
+    def set_openings(self, rows) -> None:
+        self.core.set_openings(np.ascontiguousarray(rows, dtype=np.float32).reshape(-1, 8))
+
+    def close(self) -> None:
+        pass
+
+    def updates(self, sent: dict, full: bool = False, limit: int = 12, budget: int = 110_000) -> list:
+        """Chunks whose mesh changed since `sent` (id -> (version, order sent)). Alternates between the most
+        recently changed (what a drone is looking at now) and the longest-waiting (so nothing starves)."""
+        info = self.core.mesh_info()
+        ids, ver, t = np.asarray(info["ids"]), np.asarray(info["ver"]), np.asarray(info["t"])
+        nfaces, nbytes = np.asarray(info["nfaces"]), np.asarray(info["nbytes"])
+        stale = []
+        for k in range(len(ids)):
+            cid = int(ids[k])
+            have = sent.get(cid)
+            if not full and have is not None and have[0] == int(ver[k]):
+                continue
+            if not full and nfaces[k] == 0 and have is None:
+                continue
+            stale.append((have[1] if have is not None else -1, cid, float(t[k]), int(nbytes[k])))
+        if full:
+            chosen = [s[1] for s in sorted(stale)]
+        else:
+            newest = sorted(stale, key=lambda s: -s[2])
+            oldest = sorted(stale, key=lambda s: s[0])
+            order, seen = [], set()
+            for a, b in zip(newest, oldest):
+                for it in (a, b):
+                    if it[1] not in seen:
+                        seen.add(it[1])
+                        order.append(it)
+            chosen, used = [], 0
+            for _, cid, _, size in order:
+                if chosen and (used + size > budget or len(chosen) >= limit):
+                    break
+                chosen.append(cid)
+                used += size
+        out = []
+        for cid in chosen:
+            d = self.core.mesh_chunk(int(cid))
+            out.append((cid, {"ver": int(d["ver"]), "v": np.asarray(d["v"]), "n": np.asarray(d["n"]),
+                              "c": np.asarray(d["c"]), "f": np.asarray(d["f"])}))
+        return out

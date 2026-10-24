@@ -12,7 +12,7 @@ import numpy as np
 from scipy import ndimage
 
 OPEN_MARGIN = 1.5  # m behind the facade for a pixel to count as "open"
-MIN_BLOB_PX = 10
+MIN_BLOB_FRAC = 0.0065  # smallest opening, as a share of the frame
 
 
 def ray_angles(body_rays: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -43,7 +43,7 @@ def opening_cue(depth: np.ndarray, az: np.ndarray, el: np.ndarray, expected: np.
     for k in range(1, n + 1):
         m = lab == k
         cnt = int(m.sum())
-        if cnt < MIN_BLOB_PX:
+        if cnt < MIN_BLOB_FRAC * h * w:
             continue
         a, e = float(az[m].mean()), float(el[m].mean())
         cost = np.hypot(a - expected[0], e - expected[1]) - 0.002 * cnt
@@ -65,6 +65,8 @@ def servo_sticks(cue: dict, d0: float, clearance: float) -> tuple[float, float, 
     vy = float(np.clip(1.0 * lat, -0.5, 0.5))
     vz = float(np.clip(1.0 * vert, -0.4, 0.4))
     yaw = float(np.clip(1.5 * cue["az"], -0.8, 0.8))
-    centred = abs(cue["az"]) < 0.15 and abs(lat) < 0.4 and abs(vert) < 0.4
-    vx = 0.5 if centred and clearance > 0.8 else 0.0
+    margin = cue.get("margin")
+    tol = 0.4 if margin is None else float(np.clip(margin / 2, 0.12, 0.5))   # how far off centre is still safe
+    centred = abs(cue["az"]) < 0.15 and abs(lat) < tol and abs(vert) < tol
+    vx = 0.5 if centred and clearance > 0.8 and (margin is None or margin > 0.1) else 0.0
     return vx, vy, vz, yaw

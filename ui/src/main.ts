@@ -128,6 +128,8 @@ function applyView(v: ViewSettings): void {
   mapView.setPointSize(v.pointSize);
   mapView.setSmoothed(v.smoothed);
   mapView.setRender(v.mapRender);
+  mapView.setDemo(v.demoClean);
+  document.getElementById("demo-badge")!.style.display = v.demoClean ? "" : "none";
   document.getElementById("cut-label")!.textContent = v.floor === "all" ? "" : `cutaway: ${v.floor}`;
   for (const s of [swarmReal, swarmMap]) s.setScale(v.droneScale);
   for (const c of [commsReal, commsMap]) {
@@ -181,6 +183,7 @@ async function onWorld(b: BuildingInfo, cfg: SimConfig): Promise<void> {
   mapView.build(b, cfg);
   await realView.build(b);
   if (token !== worldToken) return;
+  if (realView.vox) mapView.setTrueModel(b, realView.vox);
   const [x0, y0, x1, y1] = b.bbox;
   rig.overviewTarget.set((x0 + x1) / 2, (y0 + y1) / 2, 2);
   rig.overviewPos.set(x0 - 45, y0 - 60, 85);

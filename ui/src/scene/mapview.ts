@@ -4,6 +4,7 @@ import { decodeB64, type BuildingInfo, type Candidate, type MapDeltas, type MapE
 import { siteDressing } from "./realview";
 import { PointCloud } from "./pointcloud";
 import { SurfaceLayer } from "./surface";
+import { VoxelLayer } from "./voxels";
 
 export type ColorMode = "texture" | "quality" | "freshness" | "confidence";
 
@@ -45,6 +46,13 @@ export class MapView {
   private rgb = new Uint16Array(0);
   private q = new Uint8Array(0);
   private seen = new Uint16Array(0);
+  // Demo render: the true building's voxels, shown only where the master has scanned (ideal geometry, not the raw mesh)
+  private demo: VoxelLayer | null = null;
+  private demoVox: Uint8Array | null = null;
+  private demoShape: [number, number, number] = [0, 0, 0];
+  private demoShown = new Uint8Array(0);
+  private demoTints: THREE.Color[] = [];
+  demoOn = false;
   private threshold = 0.74;
   private shell = new THREE.Group();
   private dressing: THREE.Group | null = null;
@@ -75,8 +83,8 @@ export class MapView {
     this.rgb = new Uint16Array(n);
     this.q = new Uint8Array(n);
     this.seen = new Uint16Array(n);
-    const near = cfg.scan_near ?? 2;
-    this.threshold = (cfg.cam_range - cfg.proper_scan_range) / (cfg.cam_range - near);
+    const near = Number(cfg.scan_near ?? 2);
+    this.threshold = (Number(cfg.scan_far ?? 25) - cfg.proper_scan_range) / (Number(cfg.scan_far ?? 25) - near);
     this.cloud = new PointCloud(b.shape, this.pointSize);
     this.cloud.material.clippingPlanes = this.clip;
     this.surf.material.clippingPlanes = this.clip;
@@ -123,6 +131,7 @@ export class MapView {
   setClip(planes: THREE.Plane[]): void {
     this.clip.length = 0;
     this.clip.push(...planes);
+    this.demo?.setClip(planes);
   }
 
   /** Points, surfaces or both. "auto" shows the surface once the GX10 has produced one. */
@@ -131,7 +140,63 @@ export class MapView {
     this.applyRender();
   }
 
+  /** Give the demo render the true voxels (called once the real building is built). */
+  setTrueModel(b: BuildingInfo, vox: Uint8Array): void {
+    this.demo?.dispose();
+    this.demo = new VoxelLayer(b.palette, b.shape, new Set());
+    this.demo.setClip(this.clip);
+    this.group.add(this.demo.group);
+    this.demoVox = vox;
+    this.demoShape = b.shape;
+    this.demoShown = new Uint8Array(vox.length);
+    this.demoTints = b.palette.map((p) => new THREE.Color(p.rgb[0] / 255, p.rgb[1] / 255, p.rgb[2] / 255));
+    this.demo.group.visible = this.demoOn;
+    if (this.demoOn) this.revealAll();
+  }
+
+  /** Switch the demo render on or off: it replaces the raw surface and points while on. */
+  setDemo(on: boolean): void {
+    if (on === this.demoOn) return;
+    this.demoOn = on;
+    if (this.demo) this.demo.group.visible = on;
+    if (on) this.revealAll();
+    this.applyRender();
+  }
+
+  private revealAll(): void {
+    for (let i = 0; i < this.q.length; i++) if (this.q[i] > 0) this.reveal(i);
+    this.demo?.flush();
+  }
+
+  /** Show the true voxels around a scanned voxel (one voxel of slack: the master's pose drifts). */
+  private reveal(flat: number): void {
+    const vox = this.demoVox;
+    if (!vox || !this.demo) return;
+    const [sx, sy, sz] = this.demoShape;
+    const z = flat % sz, y = Math.floor(flat / sz) % sy, x = Math.floor(flat / (sz * sy));
+    const at = (a: number, b: number, c: number) => (a < 0 || b < 0 || c < 0 || a >= sx || b >= sy || c >= sz ? 0 : vox[(a * sy + b) * sz + c]);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const a = x + dx, b = y + dy, c = z + dz;
+          if (a < 0 || b < 0 || c < 0 || a >= sx || b >= sy || c >= sz) continue;
+          const n = (a * sy + b) * sz + c;
+          const m = vox[n];
+          if (m === 0 || m === 1 || this.demoShown[n]) continue; // air, or asphalt (the ground is drawn separately)
+          if (at(a + 1, b, c) && at(a - 1, b, c) && at(a, b + 1, c) && at(a, b - 1, c) && at(a, b, c + 1) && (c === 0 || at(a, b, c - 1))) continue;
+          this.demoShown[n] = 1;
+          this.demo.set(n, m, this.demoTints[m]);
+        }
+      }
+    }
+  }
+
   private applyRender(): void {
+    if (this.demoOn) {
+      this.surf.group.visible = false;
+      if (this.cloud) this.cloud.points.visible = false;
+      return;
+    }
     const hasSurf = this.surf.count > 0;
     const m = this.renderMode === "auto" ? (hasSurf ? "surface" : "points") : this.renderMode;
     this.surf.group.visible = m !== "points";
@@ -156,7 +221,9 @@ export class MapView {
       for (let i = 0; i < idx.length; i++) {
         this.rgb[idx[i]] = rgb[i];
         this.q[idx[i]] = q[i];
+        if (this.demoOn && q[i] > 0) this.reveal(idx[i]);
       }
+      if (this.demoOn) this.demo?.flush();
     }
     if (m.surf?.length) {
       this.surf.apply(m.surf);

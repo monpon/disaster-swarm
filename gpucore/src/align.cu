@@ -67,60 +67,116 @@ __device__ void jacobi6(float* A, float* ev, float* V) {
     for (int i = 0; i < 6; i++) ev[i] = A[i*6+i];
 }
 
+// ---- frame-to-model residual. The model is the signed-distance volume (value / gradient by trilinear
+// interpolation of the 8 surrounding voxels, no search radius) plus absolute landmark planes. Returns false
+// where the model has nothing to say.
+#define A_MAX_DEPTH 40.0f
+#define A_LM_CAP 1.0f
+__device__ bool sample_tsdf(const TsdfDims& t, const float* __restrict__ S, const float* __restrict__ W,
+                            float px, float py, float pz, float& r, float* n)
+{
+    float gx = px / T_VOXEL - 0.5f, gy = py / T_VOXEL - 0.5f, gz = pz / T_VOXEL - 0.5f;
+    int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
+    float fx = gx - ix, fy = gy - iy, fz = gz - iz;
+    if (ix < 0 || iy < 0 || iz < 0 || ix + 1 >= t.nx || iy + 1 >= t.ny || iz + 1 >= t.nz) return false;
+    float v[8];
+    for (int c = 0; c < 8; c++) {
+        long long q = tidx(t, ix + (c & 1), iy + ((c >> 1) & 1), iz + ((c >> 2) & 1));
+        float w = W[q];
+        if (w < T_MIN_W) return false;
+        v[c] = S[q] / w;
+    }
+    float wx[2] = {1.0f - fx, fx}, wy[2] = {1.0f - fy, fy}, wz[2] = {1.0f - fz, fz};
+    float val = 0, g0 = 0, g1 = 0, g2 = 0;
+    for (int c = 0; c < 8; c++) {
+        int cx = c & 1, cy = (c >> 1) & 1, cz = (c >> 2) & 1;
+        val += v[c] * wx[cx] * wy[cy] * wz[cz];
+        g0 += v[c] * (cx ? 1.0f : -1.0f) * wy[cy] * wz[cz];
+        g1 += v[c] * (cy ? 1.0f : -1.0f) * wx[cx] * wz[cz];
+        g2 += v[c] * (cz ? 1.0f : -1.0f) * wx[cx] * wy[cy];
+    }
+    float gn = sqrtf(g0*g0 + g1*g1 + g2*g2);
+    if (fabsf(val) > 0.9f || gn < 0.15f) return false;      // outside the band, or too flat to say where the surface is
+    r = val / fmaxf(gn, 0.5f) * T_VOXEL;                    // metres from the surface along the gradient
+    n[0] = g0 / gn; n[1] = g1 / gn; n[2] = g2 / gn;
+    return true;
+}
+// Surface normal of a pixel from its neighbours' depths (world frame); false at depth edges.
+__device__ bool img_normal(const MapDims& d, const float* R, const float* rays, const float* e, int n, float depth, float* nv) {
+    const int K = 3;
+    int px = n % d.W, py = n / d.W;
+    if (px < K || py < K || px >= d.W - K || py >= d.H - K) return false;
+    int off[4] = {-K, K, -K * d.W, K * d.W};
+    float P[4][3];
+    for (int k = 0; k < 4; k++) {
+        int m = n + off[k];
+        float dm = e[m];
+        if (!(dm > 0.0f) || fabsf(dm - depth) > 0.15f * depth) return false;
+        float dx, dy, dz; world_dir(R, rays, m, dx, dy, dz);
+        P[k][0] = dx * dm; P[k][1] = dy * dm; P[k][2] = dz * dm;
+    }
+    float u[3] = {P[1][0]-P[0][0], P[1][1]-P[0][1], P[1][2]-P[0][2]}, w[3] = {P[3][0]-P[2][0], P[3][1]-P[2][1], P[3][2]-P[2][2]};
+    float c0 = u[1]*w[2] - u[2]*w[1], c1 = u[2]*w[0] - u[0]*w[2], c2 = u[0]*w[1] - u[1]*w[0];
+    float l = sqrtf(c0*c0 + c1*c1 + c2*c2);
+    if (l < 1e-9f) return false;
+    nv[0] = c0 / l; nv[1] = c1 / l; nv[2] = c2 / l;
+    return true;
+}
+// kind: 0 = signed-distance model, 1 = landmark plane
+__device__ bool model_residual(const TsdfDims& t, const float* __restrict__ S, const float* __restrict__ W,
+                               const float* __restrict__ lm, int nlm, const float* nimg, float px, float py, float pz,
+                               float& r, float* n, int& kind, float& wk)
+{
+    kind = 0; wk = 1.0f;
+    if (nlm > 0 && (nimg[0] != 0.0f || nimg[1] != 0.0f || nimg[2] != 0.0f)) {
+        float p[3] = {px, py, pz};
+        float best = A_LM_CAP; bool ok = false;
+        for (int q = 0; q < nlm; q++) {
+            const float* L = lm + q * 8;
+            int a = (int)L[0];
+            float dd = fabsf(p[a] - L[1]);
+            if (dd >= best || fabsf(nimg[a]) < 0.85f) continue;
+            float p1 = p[(a + 1) % 3], p2 = p[(a + 2) % 3];
+            if (p1 < L[2] - 0.8f || p1 > L[3] + 0.8f || p2 < L[4] - 0.8f || p2 > L[5] + 0.8f) continue;
+            best = dd; r = p[a] - L[1]; n[0] = n[1] = n[2] = 0.0f; n[a] = 1.0f; wk = L[6]; ok = true;
+        }
+        if (ok) { kind = 1; return true; }
+    }
+    return sample_tsdf(t, S, W, px, py, pz, r, n);
+}
+
 // one block per frame; ares: B x 24 floats
 extern "C" __global__ void k_align(
-    MapDims d, int sub, const float* __restrict__ poss, const float* __restrict__ rots, const float* __restrict__ est,
-    const float* __restrict__ rays, const float* __restrict__ tcap, const int* __restrict__ drone,
-    const int* __restrict__ pidx, const float* __restrict__ spos, const float* __restrict__ pnorm, const float* __restrict__ pt0,
-    const short* __restrict__ pdrone, const unsigned char* __restrict__ phid, const int* __restrict__ pmiss, const int* __restrict__ nview,
-    const int* __restrict__ npts, float* __restrict__ ares)
+    MapDims d, int sub, TsdfDims t, const float* __restrict__ poss, const float* __restrict__ rots, const float* __restrict__ est,
+    const float* __restrict__ rays, const float* __restrict__ S, const float* __restrict__ W,
+    const float* __restrict__ lm, int nlm, float* __restrict__ ares)
 {
-    __shared__ float sa[MAXM*3], stg[MAXM*3], snr[MAXM*3];
-    __shared__ unsigned char sgood[MAXM], soth[MAXM];
+    __shared__ float sa[MAXM*3], simg[MAXM*3], sdep[MAXM];
     __shared__ float H[49], rhs[7], red[64];
     __shared__ float Rtot[9], ttot[3], stot;
     __shared__ float dR[9], dx7[7];
-    __shared__ int ngood_s, nother_s, inl_s;
+    __shared__ int ngood_s, nland_s, inl_s, nfin_s;
     int b = blockIdx.x, tid = threadIdx.x;
     int M = (d.N + sub - 1) / sub; if (M > MAXM) M = MAXM;
     const float* R = rots + b*9;
+    const float* e = est + (long long)b * d.N;
     float cx = poss[b*3], cy = poss[b*3+1], cz = poss[b*3+2];
-    float t = tcap[b]; int dr = drone[b];
-    if (tid == 0) { for (int i = 0; i < 9; i++) Rtot[i] = (i % 4 == 0) ? 1.0f : 0.0f; ttot[0] = ttot[1] = ttot[2] = 0; stot = 0; ngood_s = 0; nother_s = 0; inl_s = 0; }
+    if (tid == 0) { for (int i = 0; i < 9; i++) Rtot[i] = (i % 4 == 0) ? 1.0f : 0.0f; ttot[0] = ttot[1] = ttot[2] = 0; stot = 0;
+                    ngood_s = 0; nland_s = 0; inl_s = 0; nfin_s = 0; }
     __syncthreads();
-    // ---- correspondences: nearest trusted planar smoothed point within the 3x3x3 cells around each point
+    // ---- the points to align: back-projected pixels, with the normal their neighbours give
     for (int i = tid; i < M; i += blockDim.x) {
         int n = i * sub;
-        float depth = est[(long long)b * d.N + n];
-        unsigned char good = 0, other = 0;
-        float a0 = 0, a1 = 0, a2 = 0, t0 = 0, t1 = 0, t2 = 0, n0 = 0, n1 = 0, n2 = 0;
-        if (depth > 0.0f && depth <= 10.0f && *npts >= 200) {
+        float depth = e[n];
+        float a0 = 0, a1 = 0, a2 = 0, nv[3] = {0, 0, 0};
+        float dd = 0.0f;
+        if (depth > 0.0f && depth <= A_MAX_DEPTH) {
             float dx, dy, dz; world_dir(R, rays, n, dx, dy, dz);
-            a0 = dx*depth; a1 = dy*depth; a2 = dz*depth;
-            float px = cx + a0, py = cy + a1, pz = cz + a2;
-            int gx = (int)floorf(px / POINT_CELL), gy = (int)floorf(py / POINT_CELL), gz = (int)floorf(pz / POINT_CELL);
-            float bestd = A_MAX_DIST2; int bp = -1;
-            for (int ox = -1; ox <= 1; ox++) for (int oy = -1; oy <= 1; oy++) for (int oz = -1; oz <= 1; oz++) {
-                int ax = gx + ox, ay = gy + oy, az = gz + oz;
-                if (ax < 0 || ay < 0 || az < 0 || ax >= d.pcx || ay >= d.pcy || az >= d.pcz) continue;
-                int pid = pidx[((long long)ax * d.pcy + ay) * d.pcz + az];
-                if (pid < 0) continue;
-                bool trusted = (t - pt0[pid] > A_TRUST_AGE) || ((int)pdrone[pid] != dr);
-                bool planar = fabsf(pnorm[pid*3]) + fabsf(pnorm[pid*3+1]) + fabsf(pnorm[pid*3+2]) > 0.0f;
-                bool hidden = phid[pid] > 0 || (pmiss[pid] >= 3 && pmiss[pid] > nview[pid]);
-                if (!trusted || !planar || hidden) continue;
-                float ex = spos[pid*3] - px, ey = spos[pid*3+1] - py, ez = spos[pid*3+2] - pz;
-                float d2 = ex*ex + ey*ey + ez*ez;
-                if (d2 < bestd) { bestd = d2; bp = pid; }
-            }
-            if (bp >= 0) {
-                good = 1; other = ((int)pdrone[bp] != dr) ? 1 : 0;
-                t0 = spos[bp*3]; t1 = spos[bp*3+1]; t2 = spos[bp*3+2]; n0 = pnorm[bp*3]; n1 = pnorm[bp*3+1]; n2 = pnorm[bp*3+2];
-            }
+            a0 = dx*depth; a1 = dy*depth; a2 = dz*depth; dd = depth;
+            if (nlm > 0 && !img_normal(d, R, rays, e, n, depth, nv)) { nv[0] = nv[1] = nv[2] = 0.0f; }
         }
-        sa[i*3] = a0; sa[i*3+1] = a1; sa[i*3+2] = a2; stg[i*3] = t0; stg[i*3+1] = t1; stg[i*3+2] = t2;
-        snr[i*3] = n0; snr[i*3+1] = n1; snr[i*3+2] = n2; sgood[i] = good; soth[i] = other;
-        if (good) { atomicAdd(&ngood_s, 1); if (other) atomicAdd(&nother_s, 1); }
+        sa[i*3] = a0; sa[i*3+1] = a1; sa[i*3+2] = a2; sdep[i] = dd;
+        simg[i*3] = nv[0]; simg[i*3+1] = nv[1]; simg[i*3+2] = nv[2];
     }
     __syncthreads();
     float prior[7] = {1.0f/(0.05f*0.05f), 1.0f/(0.05f*0.05f), 1.0f/(0.05f*0.05f), 4.0f, 4.0f, 4.0f, 1.0f/(0.04f*0.04f)};
@@ -131,13 +187,15 @@ extern "C" __global__ void k_align(
         float lH[28]; float lr[7]; float lrr = 0.0f;
         for (int k = 0; k < 28; k++) lH[k] = 0; for (int k = 0; k < 7; k++) lr[k] = 0;
         for (int i = tid; i < M; i += blockDim.x) {
-            if (!sgood[i]) continue;
+            float dep = sdep[i];
+            if (dep <= 0.0f) continue;
             float ax = sa[i*3], ay = sa[i*3+1], az = sa[i*3+2];
-            float nx = snr[i*3], ny = snr[i*3+1], nz = snr[i*3+2];
-            float r = (cx + ax - stg[i*3]) * nx + (cy + ay - stg[i*3+1]) * ny + (cz + az - stg[i*3+2]) * nz;
-            lrr += r * r;
+            float r, nn[3], wk; int kind;
+            if (!model_residual(t, S, W, lm, nlm, simg + i*3, cx + ax, cy + ay, cz + az, r, nn, kind, wk)) continue;
+            if (it == 0) { atomicAdd(&ngood_s, 1); if (kind == 1) atomicAdd(&nland_s, 1); lrr += r * r; }
+            float nx = nn[0], ny = nn[1], nz = nn[2];
             float ar = fabsf(r);
-            float w = ar < A_HUBER ? 1.0f : A_HUBER / fmaxf(ar, 1e-9f);
+            float w = (ar < A_HUBER ? 1.0f : A_HUBER / fmaxf(ar, 1e-9f)) * wk / (1.0f + (dep / 8.0f) * (dep / 8.0f));
             float J[7] = {ay*nz - az*ny, az*nx - ax*nz, ax*ny - ay*nx, nx, ny, nz, nx*ax + ny*ay + nz*az};
             int k = 0;
             for (int p = 0; p < 7; p++) { lr[p] += -w * J[p] * r; for (int q = p; q < 7; q++) lH[k++] += w * J[p] * J[q]; }
@@ -176,27 +234,37 @@ extern "C" __global__ void k_align(
     // ---- final residual and inliers
     if (tid == 0) { red[1] = 0; red[2] = 0; }
     __syncthreads();
-    float lrr = 0; int linl = 0;
+    float lrr = 0; int linl = 0, lfin = 0;
     for (int i = tid; i < M; i += blockDim.x) {
-        if (!sgood[i]) continue;
-        float r = (cx + sa[i*3] - stg[i*3]) * snr[i*3] + (cy + sa[i*3+1] - stg[i*3+1]) * snr[i*3+1] + (cz + sa[i*3+2] - stg[i*3+2]) * snr[i*3+2];
-        lrr += r * r; if (fabsf(r) < A_HUBER) linl++;
+        float dep = sdep[i];
+        if (dep <= 0.0f) continue;
+        float r, nn[3], wk; int kind;
+        if (!model_residual(t, S, W, lm, nlm, simg + i*3, cx + sa[i*3], cy + sa[i*3+1], cz + sa[i*3+2], r, nn, kind, wk)) continue;
+        lrr += r * r; lfin++; if (fabsf(r) < A_HUBER) linl++;
     }
-    atomicAdd(&red[1], lrr); atomicAdd(&inl_s, linl);
+    atomicAdd(&red[1], lrr); atomicAdd(&inl_s, linl); atomicAdd(&nfin_s, lfin);
     __syncthreads();
     if (tid == 0) {
         float* o = ares + b * 24;
         for (int i = 0; i < 24; i++) o[i] = 0.0f;
-        float rms1 = sqrtf(red[1] / fmaxf((float)ngood_s, 1.0f));
+        float rms1 = sqrtf(red[1] / fmaxf((float)nfin_s, 1.0f));
         float lw[3]; log_so3(Rtot, lw);
         float ang = sqrtf(lw[0]*lw[0] + lw[1]*lw[1] + lw[2]*lw[2]);
         float tn = sqrtf(ttot[0]*ttot[0] + ttot[1]*ttot[1] + ttot[2]*ttot[2]);
-        bool accept = ngood_s >= 50 && inl_s >= 50 && rms1 <= 0.9f * rms0 && tn <= 1.5f && ang <= 0.17453293f && fabsf(stot) <= 0.15f;
+        bool fit = rms1 <= 0.95f * rms0 || rms1 < 0.05f;
+        bool accept = ngood_s >= 80 && inl_s >= 60 && fit && tn <= 1.5f && ang <= 0.17453293f && fabsf(stot) <= 0.15f;
         o[0] = accept ? 1.0f : 0.0f;
+        // why a frame was rejected: 1 too few correspondences, 2 too few inliers, 3 fit did not improve, 4 translation too big,
+        // 5 rotation too big, 6 depth scale too big
+        o[22] = accept ? 0.0f : ngood_s < 80 ? 1.0f : inl_s < 60 ? 2.0f : !fit ? 3.0f : tn > 1.5f ? 4.0f
+                : ang > 0.17453293f ? 5.0f : 6.0f;
+        o[23] = (float)ngood_s;
         o[1] = ttot[0]; o[2] = ttot[1]; o[3] = ttot[2];
         for (int i = 0; i < 9; i++) o[4+i] = Rtot[i];
         o[13] = 1.0f + stot;
-        o[18] = ngood_s > 0 ? (float)nother_s / (float)ngood_s : 0.0f;
+        // "cross" is how much of the evidence is independent of this drone's own earlier (drifted) frames: landmarks fully,
+        // the signed-distance model only a little (it can be made of this drone's own view)
+        o[18] = ngood_s > 0 ? ((float)nland_s + 0.25f * (float)(ngood_s - nland_s)) / (float)ngood_s : 0.0f;
         o[19] = (float)inl_s; o[20] = rms0; o[21] = rms1;
         if (accept) {   // directions the view actually constrains: depth scale eliminated first, then eigen-split
             float Hs[36], ev[6], V[36], pw[6];
@@ -208,10 +276,10 @@ extern "C" __global__ void k_align(
             float x[6] = {lw[0], lw[1], lw[2], ttot[0], ttot[1], ttot[2]};
             float xs[6]; for (int i = 0; i < 6; i++) xs[i] = x[i] * pw[i];
             float xo[6] = {0, 0, 0, 0, 0, 0};
-            for (int e = 0; e < 6; e++) {
-                if (ev[e] < 4.0f) continue;
-                float c = 0; for (int i = 0; i < 6; i++) c += V[i*6+e] * xs[i];
-                for (int i = 0; i < 6; i++) xo[i] += V[i*6+e] * c;
+            for (int e2 = 0; e2 < 6; e2++) {
+                if (ev[e2] < 4.0f) continue;
+                float c = 0; for (int i = 0; i < 6; i++) c += V[i*6+e2] * xs[i];
+                for (int i = 0; i < 6; i++) xo[i] += V[i*6+e2] * c;
             }
             for (int i = 0; i < 6; i++) xo[i] /= pw[i];
             o[14] = xo[3]; o[15] = xo[4]; o[16] = xo[5]; o[17] = xo[2];

@@ -9,6 +9,7 @@ export type ViewMode = "real" | "map" | "split";
 export interface ViewSettings extends Layers {
   view: ViewMode;
   floor: string; // "all" | "roof off" | "F1".."Fn"
+  demoClean: boolean; // demo render: the building's ideal geometry, revealed where the swarm has scanned
   mapColor: ColorMode;
   staleAfter: number;
   droneScale: number;
@@ -28,12 +29,23 @@ export interface ControlHooks {
   onOverview: () => void;
 }
 
+/** Building types the generator offers (the server's PRESETS in sim/disaster_sim/config.py). */
+const BUILDINGS: Record<string, { label: string; desc: string; survivors: number }> = {
+  factory: { label: "Factory", survivors: 20, desc: "3 floors, rooms + machinery hall, shafts, a blocked dock, a collapsed corner" },
+  warehouse: { label: "Warehouse", survivors: 16, desc: "1 tall floor, a few huge bays packed with shelving, loading docks" },
+  hangar: { label: "Hangar", survivors: 12, desc: "one enormous open hall, 14 m ceiling, machinery, no interior walls" },
+  office: { label: "Office block", survivors: 24, desc: "4 floors of small rooms and corridors, many broken windows" },
+  hospital: { label: "Hospital", survivors: 24, desc: "2 floors, dense ward rooms off corridors, tight doorways" },
+  collapsed: { label: "Collapsed factory", survivors: 20, desc: "after a quake: holes through floors, rubble, several blocked entries" },
+};
+
 /** lil-gui panel: run controls, scenario parameters, and view layers. */
 export class ControlPanel {
   readonly gui: GUI;
   readonly view: ViewSettings = {
     view: "split",
     floor: "all",
+    demoClean: false,
     mapColor: "texture",
     staleAfter: 120,
     droneScale: 2.5,
@@ -55,8 +67,11 @@ export class ControlPanel {
   private run = { speed: 1, playing: true };
   private scenario = {
     seed: 1,
+    preset: "factory",
     n_drones: 16,
     n_survivors: 20,
+    known_outline: true,
+    plan_assist: false,
     battery_wh: 2,
     wind_speed: 2,
     wind_dir_deg: 30,
@@ -87,11 +102,40 @@ export class ControlPanel {
     sim.add(actions, "reset").name("↺ Reset mission");
     sim.add(actions, "randomize").name("🎲 New random building");
 
-    const sc = this.gui.addFolder("Scenario (applies on reset)");
-    sc.add(this.scenario, "seed", 0, 9999, 1);
-    sc.add(this.scenario, "n_drones", 1, 32, 1).name("drones");
-    sc.add(this.scenario, "n_survivors", 1, 40, 1).name("survivors");
-    sc.add(this.scenario, "battery_wh", 5, 60, 1).name("battery (Wh)");
+    // What to map and with how many drones. Everything here applies when you press "Apply and restart".
+    const ms = this.gui.addFolder("Mission setup");
+    const about = { text: BUILDINGS[this.scenario.preset].desc };
+    const aboutCtrl = ms.add(about, "text").name("about").disable();
+    ms.add(this.scenario, "preset", Object.fromEntries(Object.entries(BUILDINGS).map(([k, v]) => [v.label, k])))
+      .name("building type")
+      .onChange((k: string) => {
+        about.text = BUILDINGS[k].desc;
+        this.scenario.n_survivors = BUILDINGS[k].survivors;
+        aboutCtrl.updateDisplay();
+        this.gui.controllersRecursive().forEach((c) => c.updateDisplay());
+      });
+    ms.add(this.scenario, "n_drones", 1, 32, 1).name("number of drones");
+    ms.add(this.scenario, "n_survivors", 1, 40, 1).name("survivors");
+    ms.add(this.scenario, "known_outline").name("master knows outline");
+    ms.add(this.scenario, "plan_assist").name("building plan given (openings known)");
+    ms.add({
+      demo: () => {
+        this.scenario.known_outline = true;
+        this.scenario.plan_assist = true;
+        this.scenario.battery_wh = 8;
+        this.view.demoClean = true;
+        this.gui.controllersRecursive().forEach((c) => c.updateDisplay());
+        emit();
+        this.reset();
+        this.run.speed = 8;
+        net.control("speed", { value: 8 });
+      },
+    }, "demo").name("▶ Demo preset (plan-assisted + clean render)");
+    ms.add(this.scenario, "seed", 0, 9999, 1).name("random seed");
+    ms.add({ apply: () => this.reset() }, "apply").name("↺ Apply and restart");
+
+    const sc = this.gui.addFolder("Conditions (applies on reset)");
+    sc.add(this.scenario, "battery_wh", 0.5, 10, 0.5).name("battery (Wh)");
     sc.add(this.scenario, "wind_speed", 0, 10, 0.5).name("wind (m/s)");
     sc.add(this.scenario, "wind_dir_deg", 0, 360, 5).name("wind dir (°)");
     sc.add(this.scenario, "gust_strength", 0, 4, 0.25).name("gusts");
@@ -108,6 +152,7 @@ export class ControlPanel {
     vw.add(this.view, "mapRender", { "Auto (surface when available)": "auto", "Points": "points", "Surface": "surface", "Surface + points": "both" })
       .name("map render")
       .onChange(emit);
+    vw.add(this.view, "demoClean").name("DEMO: clean model (revealed by scan)").onChange(emit);
     vw.add(this.view, "smoothed").name("smoothed cloud (off = raw)").onChange(emit);
     vw.add(this.view, "pointSize", 0.05, 1, 0.05).name("map point size (m)").onChange(emit);
     vw.add(this.view, "droneScale", 1, 8, 0.5).name("drone scale").onChange(emit);
@@ -156,7 +201,7 @@ export class ControlPanel {
   syncFromServer(cfg: SimConfig | null, running: boolean, speed: number): void {
     if (cfg) {
       for (const k of Object.keys(this.scenario) as (keyof typeof this.scenario)[]) {
-        if (k in cfg) this.scenario[k] = cfg[k];
+        if (k in cfg) (this.scenario as Record<string, unknown>)[k] = cfg[k];
       }
     }
     this.run.playing = running;

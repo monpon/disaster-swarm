@@ -196,6 +196,47 @@ async def ws_endpoint(ws: WebSocket) -> None:
         server.clients.pop(ws, None)
 
 
+@app.get("/entries")
+async def entries() -> list:
+    """Every entry point with how it was measured and how the attempts went."""
+    out = []
+    for e in server.sim.master.entries:
+        out.append({"id": e.id, "side": e.side, "center": [round(float(v), 2) for v in e.center], "w": round(float(e.w), 2),
+                    "h": round(float(e.h), 2), "fitted": e.fitted, "confirmed": e.confirmed, "quality": round(e.quality, 2),
+                    "rect": None if e.rect is None else [e.rect[0], round(e.rect[1], 2), [round(v, 2) for v in e.rect[2]],
+                                                         [round(v, 2) for v in e.rect[3]]],
+                    "fails": e.fails, "ok": e.ok, "retired": e.retired, "blocked": e.blocked, "fail_log": e.fail_log[-6:]})
+    return out
+
+
+@app.get("/checks")
+async def checks() -> list:
+    """The gap / opening checks: what state each is in and why it may be waiting."""
+    m = server.sim.master
+    return [{"id": q["id"], "prio": q["prio"], "entry": q.get("entry"), "side": q["side"], "state": q["state"], "tries": q["tries"],
+             "looks": q["looks"], "center": [round(float(v), 1) for v in q["center"]], "drone": q.get("drone"),
+             "retry_in": round(max(0.0, q.get("retry_t", 0.0) - m.t_now), 1), "why": q.get("why", "")} for q in m.suspects if q["prio"] == 0 or q["state"] != "new"][:60]
+
+
+@app.get("/meshdebug")
+async def meshdebug(cid: int = -1, all: int = 0) -> dict:
+    """Chunks that hold signed-distance data, with how much of it is near a surface and what their mesh is:
+    a chunk with surface voxels and no faces is a hole in the viewer."""
+    core = getattr(server.sim, "core", None)
+    if core is None:
+        return {"error": "no rust core"}
+    if cid >= 0:
+        return {"cid": cid, "grid": [None if v != v else round(v, 3) for v in core.tsdf_chunk(cid)]}
+    rows = core.tsdf_stats()
+    nc = server.sim.master.surface.core.mesh_totals()
+    holes = [r for r in rows if r[2] > 200 and r[4] < 1]
+    if all:
+        return {"rows": [list(map(int, r)) for r in rows]}
+    return {"chunks_with_data": len(rows), "holes": len(holes), "totals": [int(v) for v in nc],
+            "hole_rows": [list(map(int, r)) for r in holes[:60]], "dirty": int(sum(r[3] for r in rows)),
+            "sample": [list(map(int, r)) for r in rows[:30]]}
+
+
 @app.get("/profile")
 async def profile(secs: float = 20.0, thread: str = "sim") -> dict:
     """Where the sim thread spends its time: a 100 Hz stack sampler (cumulative % per function,

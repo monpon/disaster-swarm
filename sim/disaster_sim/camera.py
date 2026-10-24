@@ -87,7 +87,7 @@ class RGBDCamera:
         self.dev = dev
         # Pad the world so rays never need bounds checks: below ground is solid asphalt,
         # everywhere else outside the site is air.
-        pad = int(np.ceil(cfg.cam_range)) + 2
+        pad = min(int(np.ceil(cfg.cam_range)), 25) + 2
         sx, sy, sz = building.vox.shape
         padded = np.zeros((sx + 2 * pad, sy + 2 * pad, sz + 2 * pad), dtype=np.uint8)
         padded[:, :, :pad] = M.ASPHALT

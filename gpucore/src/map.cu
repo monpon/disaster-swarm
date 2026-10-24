@@ -44,16 +44,17 @@ extern "C" __global__ void k_carve(
     MapDims d, int B, const float* __restrict__ poss, const float* __restrict__ rots, const float* __restrict__ est,
     const float* __restrict__ rays, const float* __restrict__ steps, float carve_max,
     int* cstamp, int* delta, const int* __restrict__ pidx, int* pmiss, int* pver, int* pgh,
-    unsigned int frame_id0, int batch_id)
+    unsigned int frame_id0, int batch_id, int pstride)
 {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)B * d.N) return;
     int b = (int)(idx / d.N), n = (int)(idx % d.N);
+    if (!keep_pixel(n, pstride)) return;   // large frames: neighbouring rays cross the same voxels
     float dx, dy, dz; world_dir(rots + b*9, rays, n, dx, dy, dz);
     float px = poss[b*3], py = poss[b*3+1], pz = poss[b*3+2];
     float depth = est[idx];
     bool hit = depth > 0.0f;
-    float reach = hit ? depth - 0.6f : carve_max;
+    float reach = hit ? depth - 0.6f - 0.1f * depth : carve_max;   // depth estimates run a few percent long
     int fid = (int)(frame_id0 + b);
     for (int k = 0; k < d.ns; k++) {
         float s = steps[k];
@@ -263,4 +264,35 @@ extern "C" __global__ void k_pts_fin(
     praw[pid*3] = nx; praw[pid*3+1] = ny; praw[pid*3+2] = nz;
     for (int k = 0; k < 3; k++) pcol[pid*3+k] = (unsigned char)fminf(fmaxf(pcsum[pid*3+k] / w, 0.0f), 255.0f);
     pver[pid] += 1; prv[pid] += 1; pdirty[pid] = 1;
+}
+
+// A gap that a drone has looked at and found to be wall: make the map's wall layer solid across the rectangle.
+extern "C" __global__ void k_fill_map(MapDims d, int axis, int layer, int a0, int a1, int b0, int b1, int tick,
+                                      int* lo, unsigned char* mat, float* quality, int* stamp)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int na = a1 - a0, nb = b1 - b0;
+    if (i >= na * nb) return;
+    int c[3];
+    c[axis] = layer; c[(axis + 1) % 3] = a0 + i / nb; c[(axis + 2) % 3] = b0 + i % nb;
+    int v = vox_of(d, c[0] + 0.5f, c[1] + 0.5f, c[2] + 0.5f);
+    if (v < 0) return;
+    lo[v] = LO_MAX_V; mat[v] = 2; quality[v] = 1.0f; stamp[v] = tick;
+}
+
+// An opening that a drone has measured: clear the wall layer across the rectangle, and a short corridor on both sides
+// (`nlayers` layers from `layer`, stepping `step` = +-1), so the planner has a doorway to fly through.
+extern "C" __global__ void k_carve_map(MapDims d, int axis, int layer, int step, int nlayers, int a0, int a1, int b0, int b1, int tick,
+                                       int* lo, int* stamp)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int na = a1 - a0, nb = b1 - b0;
+    if (i >= na * nb * nlayers) return;
+    int k = i / (na * nb), r = i % (na * nb);
+    int c[3];
+    c[axis] = layer + step * (k - 2);   // two layers outside, the wall, two inside (step points inward)
+    c[(axis + 1) % 3] = a0 + r / nb; c[(axis + 2) % 3] = b0 + r % nb;
+    int v = vox_of(d, c[0] + 0.5f, c[1] + 0.5f, c[2] + 0.5f);
+    if (v < 0) return;
+    if (lo[v] > LO_MIN_V) { lo[v] = LO_MIN_V; stamp[v] = tick; }
 }

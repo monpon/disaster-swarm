@@ -14,3 +14,19 @@ __device__ __forceinline__ float nrand(unsigned long long seed, unsigned long lo
     float u1 = urand(seed, ctr * 2ULL), u2 = urand(seed, ctr * 2ULL + 1ULL);
     return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * PI_F * u2);
 }
+
+// signed-distance volume (filled by k_tsdf in mesh.cu, also the alignment target)
+#define T_VOXEL 0.2f
+#define T_MU 0.5f
+#define T_MIN_W 0.015f   /* a single sighting of a surface is enough to mesh it */
+struct TsdfDims { int nx, ny, nz, ncx, ncy, ncz; };
+__device__ __forceinline__ long long tidx(const TsdfDims& t, int x, int y, int z) { return ((long long)x * t.ny + y) * t.nz + z; }
+
+// Which pixels of a big frame take part in carving / surface fusion (1 in `s`). Hashed rather than `n % s`: with the
+// frame width a multiple of s, `n % s` keeps the same image columns in every row and leaves vertical stripes of
+// unobserved voxels between them.
+__device__ __forceinline__ bool keep_pixel(int n, int s) {
+    if (s <= 1) return true;
+    unsigned h = (unsigned)n * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    return (h % (unsigned)s) == 0;
+}

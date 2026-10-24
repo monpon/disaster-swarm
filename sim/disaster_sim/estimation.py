@@ -50,11 +50,14 @@ class SimulatedVIO:
         self.kf_err = np.zeros((n, MAX_KEYFRAMES, 4))
         self.kf_n = np.zeros(n, dtype=int)
         self.kf_last = np.full((n, 3), 1e9)
+        self.exact = False  # plan-registered: the estimate is the true pose, no drift of any kind
 
     def update(self, i: int, t: float, truth: dict) -> None:
         p = np.asarray(truth["pos"], dtype=float)
         prev = self.prev[i]
         self.prev[i] = p.copy()
+        if self.exact:
+            return
         if truth.get("grounded") and np.linalg.norm(p[:2] - self.base[:2]) < BASE_FIX_RADIUS + 15:
             self.err_p[i] *= 0.0  # parked on a pad: known position
             self.err_yaw[i] = 0.0
@@ -95,6 +98,8 @@ class SimulatedVIO:
 
     def correct(self, i: int, dp: np.ndarray, dyaw: float, gain: float = 0.3) -> None:
         """A map-relative fix from the master (frame-to-map alignment): shift the estimate."""
+        if self.exact:
+            return
         self.err_p[i] += gain * np.asarray(dp)
         self.err_yaw[i] += gain * dyaw
 
@@ -105,7 +110,8 @@ class SimulatedVIO:
         return p, rot
 
     def velocity(self, i: int, truth: dict) -> np.ndarray:
-        return rot_z(self.err_yaw[i]) @ np.asarray(truth["vel"], dtype=float) + self.rng.normal(0.0, 0.05, 3)
+        noise = 0.0 if self.exact else 0.05
+        return rot_z(self.err_yaw[i]) @ np.asarray(truth["vel"], dtype=float) + self.rng.normal(0.0, noise, 3)
 
     def drift(self, i: int) -> float:
         return float(np.linalg.norm(self.err_p[i]))

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from . import materials as M
+from .config import PRESETS
 from .gpu import DEV
 from .sim import Simulation
 
@@ -28,6 +29,8 @@ def world_message(sim: Simulation) -> dict:
         "building": sim.b.to_dict(),
         "materials": M.NAMES,
         "config": sim.cfg.to_dict(),
+        "presets": {k: {"label": v["label"], "desc": v["desc"], "n_survivors": v["n_survivors"], "floors": v["floors"]}
+                    for k, v in PRESETS.items()},
     }
 
 
@@ -116,7 +119,7 @@ class MapStream:
         out = []
         if full:
             self.sent_chunks = {}
-        for cid, c in self.sim.master.surface.updates(self.sent_chunks, full, limit=12 if not full else 10 ** 9):
+        for cid, c in self.sim.master.surface.updates(self.sent_chunks, full, limit=64 if not full else 10 ** 9, budget=450_000):
             self.sent_n += 1
             self.sent_chunks[cid] = (c["ver"], self.sent_n)
             nv = len(c["v"]) // 3

@@ -17,7 +17,8 @@ KP_Z = 1.2
 KP_YAW = 2.0
 MAX_YAW_RATE = 1.2
 MAX_CLIMB, MAX_SINK = 2.0, 1.5
-HOLD_SWEEP = 0.3  # rad/s look-around while holding
+HOLD_SWEEP = 0.9  # rad: a held drone looks this far to each side of its heading, then back (never a full turn)
+HOLD_PERIOD = 12.0  # s per back-and-forth look
 
 
 class Pilot:
@@ -26,6 +27,8 @@ class Pilot:
         self.wp = [0] * n
         self.key: list = [None] * n
         self.hold: list = [None] * n
+        self.hold_yaw: list = [0.0] * n
+        self.hold_n = [0] * n
         self.seq = 0
 
     def target_index(self, i: int) -> int:
@@ -68,8 +71,11 @@ class Pilot:
         else:
             if self.hold[i] is None:
                 self.hold[i] = p.copy()
+                self.hold_yaw[i], self.hold_n[i] = r.yaw, 0
             target = self.hold[i]
-            yaw_t = r.yaw + HOLD_SWEEP / KP_YAW
+            self.hold_n[i] += 1
+            ph = 2 * np.pi * self.hold_n[i] * 0.05 / HOLD_PERIOD   # control runs at 20 Hz
+            yaw_t = self.hold_yaw[i] + HOLD_SWEEP * np.sin(ph)
 
         err = target - p
         v = KP_POS * err[:2]

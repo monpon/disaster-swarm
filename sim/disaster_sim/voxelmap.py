@@ -28,6 +28,7 @@ OCC_T, FREE_T = 4, -3
 POINT_CELL = 0.25  # point cloud: at most one point per 25 cm cell (voxel-grid filter)
 POINT_UNIT = 0.05  # point positions are stored/sent in 5 cm units (uint16)
 POINT_MAX_RANGE = 10.0  # depth beyond this is too noisy to keep as points
+CARVE_REL = 0.1  # carving stops this fraction of the range short of a hit (depth estimates run a few percent long)
 GHOST_MARGIN = 1.0  # a ray must pass this far in front of its hit to contradict a point
 PASS_GAP_S = 15.0  # a surface seen again after this long counts as a new pass
 PASS_RANGE = 8.0  # only close views count as a pass
@@ -94,7 +95,7 @@ class VoxelMap:
         self.k = Intrinsics(cfg)
         self.t_rays = torch.as_tensor(self.k.body_rays, dtype=torch.float32, device=d)
         self.t_steps = torch.as_tensor(self.k.steps, dtype=torch.float32, device=d)
-        self.q = ScanQuality(cfg.scan_near, cfg.cam_range, cfg.proper_scan_range)
+        self.q = ScanQuality(cfg.scan_near, cfg.scan_far, cfg.proper_scan_range)
         self.carve_max = min(cfg.depth_max, cfg.cam_range)
         self.lock = threading.RLock()  # the fuse worker, the planner and the streamer all touch device state
         self.frames = 0
@@ -234,7 +235,7 @@ class VoxelMap:
         self._gen += 1
         dirs = torch.einsum("nk,bjk->bnj", self.t_rays, rot)  # (B,N,3)
         hit = depth > 0
-        reach = torch.where(hit, depth - 0.6, torch.full_like(depth, self.carve_max))
+        reach = torch.where(hit, depth - 0.6 - CARVE_REL * depth, torch.full_like(depth, self.carve_max))
         S = self.t_steps
         smask = S[None, None, :] < reach[..., None]  # (B,N,S)
         samples = pos[:, None, None, :] + dirs[:, :, None, :] * S[None, None, :, None]  # (B,N,S,3)

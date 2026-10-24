@@ -10,12 +10,26 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+mod mc_table;
 mod nav;
 
 const MAX_BATCH: usize = 32; // frames processed per call
 const PCAP: usize = 6_000_000; // point store capacity (the last slot is reserved)
 const SURV_CAP: usize = 64;
 const BLOCK: u32 = 256;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TsdfDims { nx: i32, ny: i32, nz: i32, ncx: i32, ncy: i32, ncz: i32 }
+unsafe impl DeviceRepr for TsdfDims {}
+
+const PLANE_CAP: usize = 64; // detected wall planes per axis
+const OPEN_CAP: usize = 512; // detected openings
+const CHP: usize = 34; // grid points per chunk side (marching cubes uses 0..32, dual contouring -1..32)
+const NSLOTS: usize = CHP * CHP * CHP * 3;
+const MAX_TRI: usize = 5 * 32 * 32 * 32;
+
+struct ChunkMesh { ver: i32, t: f64, v: Vec<u16>, n: Vec<i8>, c: Vec<u8>, f: Vec<u32> }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -89,6 +103,17 @@ struct Core {
     interior: CudaSlice<u8>,
     per_mat: CudaSlice<f32>,
     nmat: i32,
+    // surface (TSDF + mesher)
+    td: TsdfDims,
+    lm: CudaSlice<f32>, nlm: i32,
+    ts_s: CudaSlice<f32>, ts_w: CudaSlice<f32>, ts_sc: CudaSlice<f32>, ts_wc: CudaSlice<f32>, ts_dirty: CudaSlice<u8>,
+    m_field: CudaSlice<f32>, m_obs: CudaSlice<u8>, m_used: CudaSlice<u8>, m_vid: CudaSlice<i32>, m_bsum: CudaSlice<i32>,
+    m_tri: CudaSlice<i32>, m_ntri: CudaSlice<i32>, m_total: CudaSlice<i32>, m_pos: CudaSlice<u16>, m_nrm: CudaSlice<i8>,
+    m_col: CudaSlice<u8>, m_faces: CudaSlice<u32>, m_table: CudaSlice<i8>, m_kern: CudaSlice<f32>, m_ksum3: f32,
+    dc: bool, dc_act: CudaSlice<u8>, dc_pos: CudaSlice<f32>, dc_nrm: CudaSlice<f32>,
+    m_planes: CudaSlice<f32>, m_nplanes: CudaSlice<i32>, m_opens: CudaSlice<f32>, nopen: i32,
+    planes: Vec<Vec<f32>>, hist: Vec<Vec<f32>>, chunk_hist: HashMap<u32, Vec<(u8, u16)>>, planes_t: f64,
+    chunks: HashMap<u32, ChunkMesh>, meshed_at: HashMap<u32, f64>,
     frame_ctr: u32,
     batch_ctr: i32,
     sm_off: i32,
@@ -123,17 +148,18 @@ impl Core {
         let s = ctx.default_stream();
         let src = [
             include_str!("common.cuh"), include_str!("camera.cu"), include_str!("map.cu"),
-            include_str!("align.cu"), include_str!("smooth.cu"), include_str!("stream.cu"), include_str!("comms.cu"),
+            include_str!("align.cu"), include_str!("smooth.cu"), include_str!("stream.cu"), include_str!("comms.cu"), include_str!("mesh.cu"),
         ]
         .join("\n");
         let opts = CompileOptions { fmad: Some(false), arch: Some("compute_80"), ..Default::default() };
         let ptx = compile_ptx_with_opts(src, opts).map_err(err)?;
         let module = ctx.load_module(ptx).map_err(err)?;
-        let names: [&'static str; 27] = [
+        let names: [&'static str; 41] = [
             "render", "degrade_a", "degrade_b", "depthnet", "k_carve", "k_hit", "k_apply", "k_pts_claim", "k_pts_acc",
             "k_pts_fin", "k_align", "k_apply_align", "k_scale_est", "k_clear_ahead", "k_sm_collect", "k_sm_a", "k_sm_b",
             "k_sm_c", "k_sm_d", "k_redirty", "k_vox_collect", "k_vox_pack", "k_pt_cand", "k_pt_decide", "k_pt_pack",
-            "k_seen_collect", "k_snr",
+            "k_seen_collect", "k_snr", "k_tsdf", "k_chunk_field", "k_mc_count", "k_scan_block", "k_scan_blocks",
+            "k_scan_add", "k_mc_verts", "k_mc_faces", "k_dc_cells", "k_dc_quads", "k_dc_verts", "k_fill_map", "k_fill_tsdf", "k_carve_map",
         ];
         let mut k = HashMap::new();
         for name in names.iter() {
@@ -149,6 +175,12 @@ impl Core {
         let ns = steps_v.len() as i32;
         let wflat: Vec<u8> = world.as_array().iter().copied().collect();
         let neg1_f = |n: usize| vec![-1.0f32; n];
+        let (tnx, tny, tnz) = (((sx as f32) / 0.2).ceil() as i32, ((sy as f32) / 0.2).ceil() as i32, ((sz as f32) / 0.2).ceil() as i32);
+        let td = TsdfDims { nx: tnx, ny: tny, nz: tnz, ncx: (tnx + 31) / 32, ncy: (tny + 31) / 32, ncz: (tnz + 31) / 32 };
+        let tn = (tnx as usize) * (tny as usize) * (tnz as usize);
+        // Gaussian (sigma 1.2 voxels, 7 taps) for smoothing the distance field; ksum3 = sum of the 3D kernel
+        let kern: Vec<f32> = (-3i32..=3).map(|r| (-((r * r) as f32) / (2.0 * 1.2 * 1.2)).exp()).collect();
+        let ksum3 = kern.iter().sum::<f32>().powi(3);
         let dims = MapDims { sx, sy, sz, n: nv as i32, pcx, pcy, pcz, pcap: PCAP as i32, w: cam_w, h: cam_h, npix: n_pix as i32, ns };
         Ok(Core {
             k,
@@ -187,6 +219,21 @@ impl Core {
             pos_c: z!(s, f32, MAX_BATCH * 3), rot_c: z!(s, f32, MAX_BATCH * 9), ares: z!(s, f32, MAX_BATCH * 24),
             clear: z!(s, f32, MAX_BATCH), surv: z!(s, f32, SURV_CAP * 6), surv_n: z!(s, i32, 1), cone: None, ncone: 0,
             interior: z!(s, u8, nv), per_mat: z!(s, f32, 16), nmat: colors.shape()[0] as i32,
+            td, lm: z!(s, f32, 8 * 8), nlm: 0, ts_s: z!(s, f32, tn), ts_w: z!(s, f32, tn), ts_sc: z!(s, f32, tn * 3), ts_wc: z!(s, f32, tn),
+            ts_dirty: z!(s, u8, (td.ncx * td.ncy * td.ncz) as usize),
+            m_field: z!(s, f32, CHP * CHP * CHP), m_obs: z!(s, u8, CHP * CHP * CHP), m_used: z!(s, u8, NSLOTS),
+            m_vid: z!(s, i32, NSLOTS), m_bsum: z!(s, i32, NSLOTS / 1024 + 2), m_tri: z!(s, i32, MAX_TRI * 3),
+            m_ntri: z!(s, i32, 1), m_total: z!(s, i32, 1), m_pos: z!(s, u16, NSLOTS * 3), m_nrm: z!(s, i8, NSLOTS * 3),
+            m_col: z!(s, u8, NSLOTS * 3), m_faces: z!(s, u32, MAX_TRI * 3),
+            m_table: s.clone_htod(&mc_table::MC_TRI.to_vec()).map_err(err)?,
+            m_kern: s.clone_htod(&kern).map_err(err)?, m_ksum3: ksum3,
+            dc: std::env::var("DISASTER_MESH").map(|v| v != "mc").unwrap_or(true),
+            dc_act: z!(s, u8, CHP * CHP * CHP), dc_pos: z!(s, f32, CHP * CHP * CHP * 3), dc_nrm: z!(s, f32, CHP * CHP * CHP * 3),
+            m_planes: z!(s, f32, 3 * PLANE_CAP), m_nplanes: z!(s, i32, 3), m_opens: z!(s, f32, OPEN_CAP * 8), nopen: 0,
+            planes: vec![vec![], vec![], vec![]],
+            hist: vec![vec![0.0; (sx as usize) * 20 + 2], vec![0.0; (sy as usize) * 20 + 2], vec![0.0; (sz as usize) * 20 + 2]],
+            chunk_hist: HashMap::new(), planes_t: -1e18,
+            chunks: HashMap::new(), meshed_at: HashMap::new(),
             frame_ctr: 1, batch_ctr: 0, sm_off: 0,
             stream: s,
         })
@@ -343,6 +390,7 @@ impl Core {
         self.frame_ctr += b as u32;
         let dims = self.dims;
         let npix = self.n;
+        let pstride = ((npix as i32) / 8000).max(1);  // free-space carving and the TSDF use ~8k pixels per frame
         unsafe {
             // 1. depth network on the true depth
             s.launch_builder(&self.k["depthnet"])
@@ -350,11 +398,10 @@ impl Core {
                 .arg(&scale_sigma).arg(&region_sigma).arg(&depth_max).arg(&seed).arg(&mut self.est)
                 .launch(cfg(b * npix)).map_err(err)?;
             // 2. align against the smoothed map (one block per frame)
-            let sub = 3i32;
+            let sub = (((npix as i32) + 511) / 512).max(1);  // about 512 alignment samples per frame
             s.launch_builder(&self.k["k_align"])
-                .arg(&dims).arg(&sub).arg(&d_pos).arg(&d_rot).arg(&self.est).arg(&self.rays).arg(&d_t).arg(&d_dr)
-                .arg(&self.pidx).arg(&self.spos).arg(&self.pnorm).arg(&self.pt0).arg(&self.pdrone).arg(&self.phid)
-                .arg(&self.pmiss).arg(&self.nview).arg(&self.npts).arg(&mut self.ares)
+                .arg(&dims).arg(&sub).arg(&self.td).arg(&d_pos).arg(&d_rot).arg(&self.est).arg(&self.rays)
+                .arg(&self.ts_s).arg(&self.ts_w).arg(&self.lm).arg(&self.nlm).arg(&mut self.ares)
                 .launch(LaunchConfig { grid_dim: (b as u32, 1, 1), block_dim: (BLOCK, 1, 1), shared_mem_bytes: 0 }).map_err(err)?;
             // 3. apply accepted corrections to pose / rotation / depth scale
             s.launch_builder(&self.k["k_apply_align"])
@@ -362,6 +409,13 @@ impl Core {
                 .launch(cfg(b)).map_err(err)?;
             s.launch_builder(&self.k["k_scale_est"])
                 .arg(&dims).arg(&bi).arg(&self.ares).arg(&mut self.est).launch(cfg(b * npix)).map_err(err)?;
+            // 3b. fuse the corrected frames into the signed-distance volume
+            let (npx, nbi) = (npix as i32, bi);
+            s.launch_builder(&self.k["k_tsdf"])
+                .arg(&self.td).arg(&nbi).arg(&npx).arg(&self.pos_c).arg(&self.rot_c).arg(&self.est).arg(&d_slots).arg(&self.frgb)
+                .arg(&self.rays).arg(&mut self.ts_s).arg(&mut self.ts_w).arg(&mut self.ts_sc).arg(&mut self.ts_wc)
+                .arg(&mut self.ts_dirty).arg(&pstride)
+                .launch(cfg(b * npix)).map_err(err)?;
             // 4. nearest obstacle straight ahead (for the brake and the speed governor)
             if let Some(cone) = &self.cone {
                 s.launch_builder(&self.k["k_clear_ahead"])
@@ -372,7 +426,7 @@ impl Core {
             s.launch_builder(&self.k["k_carve"])
                 .arg(&dims).arg(&bi).arg(&self.pos_c).arg(&self.rot_c).arg(&self.est).arg(&self.rays).arg(&self.steps)
                 .arg(&self.carve_max).arg(&mut self.cstamp).arg(&mut self.delta).arg(&self.pidx).arg(&mut self.pmiss)
-                .arg(&mut self.pver).arg(&mut self.pgh).arg(&fid0).arg(&batch_id)
+                .arg(&mut self.pver).arg(&mut self.pgh).arg(&fid0).arg(&batch_id).arg(&pstride)
                 .launch(cfg(b * npix)).map_err(err)?;
             let zero = [0i32];
             s.memcpy_htod(&zero, &mut self.surv_n).map_err(err)?;
@@ -657,6 +711,230 @@ impl Core {
         Ok(d)
     }
 
+
+    // ------------------------------------------------------------------ surface (TSDF + mesher)
+    /// Rectangular openings (windows, doors) found in walls, one row each: axis (0 = wall normal to x, 1 = to y),
+    /// the wall's two face coordinates, then u0, u1 (along the other horizontal axis) and v0, v1 (height).
+    /// Mesh vertices near an opening's edges are snapped onto the rectangle.
+    fn set_openings(&mut self, rows: PyReadonlyArray2<f32>) -> R<()> {
+        let n = rows.shape()[0].min(OPEN_CAP);
+        let mut flat = vec![0.0f32; OPEN_CAP * 8];
+        for (i, r) in rows.as_array().outer_iter().take(n).enumerate() {
+            for (j, v) in r.iter().take(8).enumerate() {
+                flat[i * 8 + j] = *v;
+            }
+        }
+        let changed = n as i32 != self.nopen || {
+            let old = self.stream.clone_dtoh(&self.m_opens).map_err(err)?;
+            self.stream.synchronize().map_err(err)?;
+            old[..n * 8].iter().zip(flat[..n * 8].iter()).any(|(a, b)| (a - b).abs() > 1e-4)
+        };
+        if changed {
+            self.stream.memcpy_htod(&flat, &mut self.m_opens).map_err(err)?;
+            self.nopen = n as i32;
+            self.mark_all_dirty()?;
+        }
+        Ok(())
+    }
+
+    /// Absolute landmark planes for the aligner, one row each: axis, position, then the extent along the next two axes
+    /// (axis+1, axis+2 modulo 3) as lo, hi, lo, hi, and a weight.
+    fn set_landmarks(&mut self, rows: PyReadonlyArray2<f32>) -> R<()> {
+        let n = rows.shape()[0].min(8);
+        let mut flat = vec![0.0f32; 64];
+        for (i, r) in rows.as_array().outer_iter().take(n).enumerate() {
+            for (j, v) in r.iter().take(8).enumerate() {
+                flat[i * 8 + j] = *v;
+            }
+        }
+        self.stream.memcpy_htod(&flat, &mut self.lm).map_err(err)?;
+        self.nlm = n as i32;
+        Ok(())
+    }
+
+    /// A gap that was inspected and is really wall: fill it in the map (voxel layer `layer` across the voxel ranges
+    /// a0..a1 x b0..b1 of the two other axes) and in the signed-distance volume (wall face at `face` metres, over
+    /// u0..u1 x v0..v1; `sign` is the free side). Axis 0/1/2 = x/y/z; u and v run along axis+1 and axis+2.
+    fn fill_patch(&mut self, axis: i32, layer: i32, face: f32, a0: i32, a1: i32, b0: i32, b1: i32,
+                  u0: f32, u1: f32, v0: f32, v1: f32, sign: f32, tick: i32) -> R<()> {
+        let s = self.stream.clone();
+        let (na, nb) = ((a1 - a0).max(0), (b1 - b0).max(0));
+        if na * nb > 0 {
+            let dims = self.dims;
+            unsafe {
+                s.launch_builder(&self.k["k_fill_map"])
+                    .arg(&dims).arg(&axis).arg(&layer).arg(&a0).arg(&a1).arg(&b0).arg(&b1).arg(&tick)
+                    .arg(&mut self.lo).arg(&mut self.mat).arg(&mut self.quality).arg(&mut self.stamp)
+                    .launch(cfg((na * nb) as usize)).map_err(err)?;
+            }
+        }
+        let n = (((u1 - u0) / 0.2).ceil().max(0.0) as usize) * (((v1 - v0) / 0.2).ceil().max(0.0) as usize) * 5;
+        if n > 0 {
+            let td = self.td;
+            unsafe {
+                s.launch_builder(&self.k["k_fill_tsdf"])
+                    .arg(&td).arg(&axis).arg(&face).arg(&u0).arg(&u1).arg(&v0).arg(&v1).arg(&sign)
+                    .arg(&mut self.ts_s).arg(&mut self.ts_w).arg(&mut self.ts_sc).arg(&mut self.ts_wc).arg(&mut self.ts_dirty).arg(&0i32)
+                    .launch(cfg(n)).map_err(err)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A measured opening: clear the wall layer over the voxel ranges a0..a1 x b0..b1 and two layers outside and
+    /// two inside (`step` = the inward direction, +-1) in the map, and write free space across the rectangle into
+    /// the signed-distance volume so the mesh opens there too.
+    fn carve_patch(&mut self, axis: i32, layer: i32, step: i32, face: f32, a0: i32, a1: i32, b0: i32, b1: i32,
+                   u0: f32, u1: f32, v0: f32, v1: f32, tick: i32) -> R<()> {
+        let s = self.stream.clone();
+        let (na, nb) = ((a1 - a0).max(0), (b1 - b0).max(0));
+        let nl = 5i32;
+        if na * nb > 0 {
+            let dims = self.dims;
+            unsafe {
+                s.launch_builder(&self.k["k_carve_map"])
+                    .arg(&dims).arg(&axis).arg(&layer).arg(&step).arg(&nl).arg(&a0).arg(&a1).arg(&b0).arg(&b1).arg(&tick)
+                    .arg(&mut self.lo).arg(&mut self.stamp)
+                    .launch(cfg((na * nb * nl) as usize)).map_err(err)?;
+            }
+        }
+        let n = (((u1 - u0) / 0.2).ceil().max(0.0) as usize) * (((v1 - v0) / 0.2).ceil().max(0.0) as usize) * 5;
+        if n > 0 {
+            let td = self.td;
+            let sign = 1.0f32;
+            unsafe {
+                s.launch_builder(&self.k["k_fill_tsdf"])
+                    .arg(&td).arg(&axis).arg(&face).arg(&u0).arg(&u1).arg(&v0).arg(&v1).arg(&sign)
+                    .arg(&mut self.ts_s).arg(&mut self.ts_w).arg(&mut self.ts_sc).arg(&mut self.ts_wc).arg(&mut self.ts_dirty).arg(&1i32)
+                    .launch(cfg(n)).map_err(err)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The wall planes detected so far, per axis (x, y, z), in metres.
+    fn wall_planes(&self) -> Vec<Vec<f32>> {
+        self.planes.clone()
+    }
+
+    /// Mesh up to `max_chunks` dirty chunks (those not meshed within `min_interval` seconds, least
+    /// recently meshed first). Returns how many were meshed.
+    #[pyo3(signature = (max_chunks, now, min_interval, budget_ms=30))]
+    fn mesh_step(&mut self, max_chunks: usize, now: f64, min_interval: f64, budget_ms: u128) -> R<usize> {
+        let s = self.stream.clone();
+        let dirty = s.clone_dtoh(&self.ts_dirty).map_err(err)?;
+        s.synchronize().map_err(err)?;
+        // Chunks that have data but no mesh yet come first (those are holes in the viewer), then the longest-waiting.
+        // A chunk that already has a mesh is refreshed at most every 4x `min_interval`: frames re-dirty the chunks in
+        // view constantly, and re-meshing those would starve the rest.
+        let mut cand: Vec<(u8, f64, u32)> = dirty.iter().enumerate()
+            .filter(|(_, &d)| d != 0)
+            .map(|(i, _)| {
+                let id = i as u32;
+                let t = self.meshed_at.get(&id).copied().unwrap_or(-1e18);
+                (if self.chunks.contains_key(&id) { 1u8 } else { 0u8 }, t, id)
+            })
+            .filter(|(_, t, _)| now - *t >= min_interval)
+            .collect();
+        cand.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)));
+        // a real-time budget instead of a fixed count: the sim runs faster than real time, so a fixed count starved
+        let t0 = std::time::Instant::now();
+        let mut n = 0;
+        for &(_, _, cid) in cand.iter() {
+            if n >= max_chunks || (n > 0 && t0.elapsed().as_millis() > budget_ms) { break; }
+            self.mesh_chunk_(cid, now)?;
+            n += 1;
+        }
+        if now - self.planes_t > 4.0 && !self.chunks.is_empty() {
+            self.planes_t = now;
+            self.refresh_planes()?;
+        }
+        Ok(n)
+    }
+
+    /// Diagnostics: per chunk with any signed-distance data: (id, voxels with enough weight, voxels near the surface,
+    /// dirty flag, faces in its current mesh or -1 if never meshed).
+    fn tsdf_stats(&self) -> R<Vec<(u32, i32, i32, u8, i32, i32, i32)>> {
+        let s = self.stream.clone();
+        let w = s.clone_dtoh(&self.ts_w).map_err(err)?;
+        let sv = s.clone_dtoh(&self.ts_s).map_err(err)?;
+        let dirty = s.clone_dtoh(&self.ts_dirty).map_err(err)?;
+        s.synchronize().map_err(err)?;
+        let td = self.td;
+        let mut obs: HashMap<u32, (i32, i32, i32, i32)> = HashMap::new();
+        for x in 0..td.nx { for y in 0..td.ny {
+            let base = ((x as i64 * td.ny as i64 + y as i64) * td.nz as i64) as usize;
+            let cb = (((x / 32) * td.ncy + (y / 32)) * td.ncz) as u32;
+            for z in 0..td.nz {
+                let ww = w[base + z as usize];
+                if ww >= 0.08 {
+                    let e = obs.entry(cb + (z / 32) as u32).or_insert((0, 0, 0, 0));
+                    e.0 += 1;
+                    let dv = sv[base + z as usize] / ww;
+                    if dv.abs() < 0.5 { e.1 += 1; }
+                    if dv < -0.05 { e.2 += 1; }
+                    if dv > 0.05 { e.3 += 1; }
+                }
+            }
+        } }
+        let mut out: Vec<_> = obs.into_iter().map(|(c, (o, n, ng, ps))| {
+            let f = self.chunks.get(&c).map(|m| (m.f.len() / 3) as i32).unwrap_or(if self.meshed_at.contains_key(&c) { -2 } else { -1 });
+            (c, o, n, dirty[c as usize], f, ng, ps)
+        }).collect();
+        out.sort();
+        Ok(out)
+    }
+
+    /// Diagnostics: raw signed distance (NaN where unobserved) of one chunk's 33^3 grid points, x-major.
+    fn tsdf_chunk(&self, cid: u32) -> R<Vec<f32>> {
+        let s = self.stream.clone();
+        let td = self.td;
+        let (cz, cy, cx) = (cid as i32 % td.ncz, (cid as i32 / td.ncz) % td.ncy, cid as i32 / (td.ncz * td.ncy));
+        let w = s.clone_dtoh(&self.ts_w).map_err(err)?;
+        let sv = s.clone_dtoh(&self.ts_s).map_err(err)?;
+        s.synchronize().map_err(err)?;
+        let mut out = Vec::with_capacity(CHP * CHP * CHP);
+        for gx in 0..CHP as i32 { for gy in 0..CHP as i32 { for gz in 0..CHP as i32 {
+            let (x, y, z) = (cx * 32 + gx, cy * 32 + gy, cz * 32 + gz);
+            if x >= td.nx || y >= td.ny || z >= td.nz { out.push(f32::NAN); continue; }
+            let q = ((x as i64 * td.ny as i64 + y as i64) * td.nz as i64 + z as i64) as usize;
+            out.push(if w[q] >= 0.08 { sv[q] / w[q] } else { f32::NAN });
+        } } }
+        Ok(out)
+    }
+
+    /// (ids, versions, times, face counts, byte sizes) of every meshed chunk.
+    fn mesh_info<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
+        let mut ids = vec![]; let mut ver = vec![]; let mut t = vec![]; let mut nf = vec![]; let mut nb = vec![];
+        for (cid, c) in &self.chunks {
+            ids.push(*cid); ver.push(c.ver); t.push(c.t); nf.push((c.f.len() / 3) as i32);
+            nb.push((c.v.len() * 2 + c.n.len() + c.c.len() + c.f.len() * 3) as i64);
+        }
+        let d = PyDict::new(py);
+        d.set_item("ids", ids.into_pyarray(py))?;
+        d.set_item("ver", ver.into_pyarray(py))?;
+        d.set_item("t", t.into_pyarray(py))?;
+        d.set_item("nfaces", nf.into_pyarray(py))?;
+        d.set_item("nbytes", nb.into_pyarray(py))?;
+        Ok(d)
+    }
+
+    /// One chunk's mesh: positions (u16, 1 cm units), normals (i8), colours (u8), faces (u32), flat.
+    fn mesh_chunk<'py>(&self, py: Python<'py>, cid: u32) -> R<Bound<'py, PyDict>> {
+        let c = self.chunks.get(&cid).ok_or_else(|| err("no such chunk"))?;
+        let d = PyDict::new(py);
+        d.set_item("ver", c.ver)?;
+        d.set_item("v", c.v.clone().into_pyarray(py))?;
+        d.set_item("n", c.n.clone().into_pyarray(py))?;
+        d.set_item("c", c.c.clone().into_pyarray(py))?;
+        d.set_item("f", c.f.clone().into_pyarray(py))?;
+        Ok(d)
+    }
+
+    fn mesh_totals(&self) -> (usize, usize) {
+        (self.chunks.values().map(|c| c.f.len() / 3).sum(), self.chunks.len())
+    }
+
     /// Loss (dB) per material for a run of solid cells crossed by a link (index = material id).
     fn set_link_params(&mut self, per_mat: Vec<f32>) -> R<()> {
         let mut v = per_mat;
@@ -696,6 +974,177 @@ impl Core {
 
     fn sync(&self) -> R<()> {
         self.stream.synchronize().map_err(err)
+    }
+}
+
+
+impl Core {
+    fn upload_planes(&mut self) -> R<()> {
+        let mut flat = vec![0.0f32; 3 * PLANE_CAP];
+        let mut np = [0i32; 3];
+        for a in 0..3 {
+            for (k, v) in self.planes[a].iter().take(PLANE_CAP).enumerate() {
+                flat[a * PLANE_CAP + k] = *v;
+            }
+            np[a] = self.planes[a].len().min(PLANE_CAP) as i32;
+        }
+        self.stream.memcpy_htod(&flat, &mut self.m_planes).map_err(err)?;
+        self.stream.memcpy_htod(&np.to_vec(), &mut self.m_nplanes).map_err(err)
+    }
+
+    fn mark_all_dirty(&mut self) -> R<()> {
+        let ids: Vec<u32> = self.chunks.keys().copied().collect();
+        for cid in ids {
+            let one = [1u8];
+            self.stream.memcpy_htod(&one, &mut self.ts_dirty.slice_mut(cid as usize..cid as usize + 1)).map_err(err)?;
+            self.meshed_at.remove(&cid);
+        }
+        Ok(())
+    }
+
+    /// Detect flat walls and slabs from the mesh itself: vertices whose normal points along an axis are binned
+    /// by their coordinate along it (5 cm bins); sharp peaks are planes. No prior about the building is used.
+    fn refresh_planes(&mut self) -> R<()> {
+        let mut new: Vec<Vec<f32>> = vec![vec![], vec![], vec![]];
+        for a in 0..3 {
+            let h = &self.hist[a];
+            let n = h.len();
+            let win = |i: usize| -> f32 { (i.saturating_sub(3)..(i + 4).min(n)).map(|j| h[j]).sum() };
+            let sums: Vec<f32> = (0..n).map(win).collect();
+            let mut cand: Vec<(f32, usize)> = (0..n)
+                .filter(|&i| sums[i] >= 40.0 && (i.saturating_sub(10)..(i + 11).min(n)).all(|j| sums[j] <= sums[i] + 1e-3))
+                .map(|i| (sums[i], i))
+                .collect();
+            cand.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut picked: Vec<usize> = vec![];
+            for (_, i) in cand {
+                if picked.iter().all(|&p| (p as i64 - i as i64).abs() > 10) && picked.len() < PLANE_CAP {
+                    picked.push(i);
+                }
+            }
+            picked.sort();
+            for i in picked {
+                let (mut sw, mut sx) = (0.0f64, 0.0f64);
+                for j in i.saturating_sub(3)..(i + 4).min(n) {
+                    sw += h[j] as f64;
+                    sx += h[j] as f64 * (j as f64 * 5.0 + 2.5);
+                }
+                new[a].push((sx / sw.max(1e-9) / 100.0) as f32);
+            }
+        }
+        let moved = (0..3).any(|a| new[a].len() != self.planes[a].len()
+            || new[a].iter().zip(self.planes[a].iter()).any(|(x, y)| (x - y).abs() > 0.08));
+        if moved {
+            self.planes = new;
+            self.upload_planes()?;
+            self.mark_all_dirty()?;
+        }
+        Ok(())
+    }
+
+    fn mesh_chunk_(&mut self, cid: u32, now: f64) -> R<()> {
+        let s = self.stream.clone();
+        let td = self.td;
+        let cz = cid as i32 % td.ncz;
+        let cy = (cid as i32 / td.ncz) % td.ncy;
+        let cx = cid as i32 / (td.ncz * td.ncy);
+        let prev_ver = self.chunks.get(&cid).map(|c| c.ver).unwrap_or(0);
+        s.memset_zeros(&mut self.ts_dirty.slice_mut(cid as usize..cid as usize + 1)).map_err(err)?;
+        self.meshed_at.insert(cid, now);
+        s.memset_zeros(&mut self.m_used).map_err(err)?;
+        s.memset_zeros(&mut self.m_ntri).map_err(err)?;
+        let npts = (CHP * CHP * CHP) as usize;
+        let klen = 7i32;
+        let max_tri = MAX_TRI as i32;
+        let og: i32 = if self.dc { -1 } else { 0 };
+        unsafe {
+            s.launch_builder(&self.k["k_chunk_field"])
+                .arg(&td).arg(&cx).arg(&cy).arg(&cz).arg(&og).arg(&self.ts_s).arg(&self.ts_w).arg(&self.m_kern).arg(&klen).arg(&self.m_ksum3)
+                .arg(&mut self.m_field).arg(&mut self.m_obs)
+                .launch(cfg(npts)).map_err(err)?;
+            if self.dc {
+                s.launch_builder(&self.k["k_dc_cells"])
+                    .arg(&self.m_field).arg(&self.m_obs).arg(&mut self.dc_act).arg(&mut self.dc_pos).arg(&mut self.dc_nrm)
+                    .launch(cfg(npts)).map_err(err)?;
+                s.launch_builder(&self.k["k_dc_quads"])
+                    .arg(&self.m_field).arg(&self.m_obs).arg(&self.dc_act).arg(&self.dc_pos).arg(&self.dc_nrm)
+                    .arg(&mut self.m_used).arg(&mut self.m_tri).arg(&mut self.m_ntri).arg(&max_tri)
+                    .launch(cfg(32 * 32 * 32)).map_err(err)?;
+            } else {
+                s.launch_builder(&self.k["k_mc_count"])
+                    .arg(&self.m_field).arg(&self.m_obs).arg(&self.m_table).arg(&mut self.m_used).arg(&mut self.m_tri)
+                    .arg(&mut self.m_ntri).arg(&max_tri)
+                    .launch(cfg(32 * 32 * 32)).map_err(err)?;
+            }
+        }
+        let ntri = s.clone_dtoh(&self.m_ntri).map_err(err)?[0].max(0).min(max_tri) as usize;
+        s.synchronize().map_err(err)?;
+        if ntri == 0 {
+            if self.chunks.contains_key(&cid) {
+                self.chunks.insert(cid, ChunkMesh { ver: prev_ver + 1, t: now, v: vec![], n: vec![], c: vec![], f: vec![] });
+            }
+            return Ok(());
+        }
+        let nsl = NSLOTS as i32;
+        let nb = ((NSLOTS + 1023) / 1024) as i32;
+        unsafe {
+            s.launch_builder(&self.k["k_scan_block"]).arg(&self.m_used).arg(&nsl).arg(&mut self.m_vid).arg(&mut self.m_bsum)
+                .launch(LaunchConfig { grid_dim: (nb as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 }).map_err(err)?;
+            s.launch_builder(&self.k["k_scan_blocks"]).arg(&mut self.m_bsum).arg(&nb).arg(&mut self.m_total)
+                .launch(LaunchConfig { grid_dim: (1, 1, 1), block_dim: (32, 1, 1), shared_mem_bytes: 0 }).map_err(err)?;
+            s.launch_builder(&self.k["k_scan_add"]).arg(&nsl).arg(&mut self.m_vid).arg(&self.m_bsum).launch(cfg(NSLOTS)).map_err(err)?;
+        }
+        let nv = s.clone_dtoh(&self.m_total).map_err(err)?[0].max(0) as usize;
+        s.synchronize().map_err(err)?;
+        let (tol, align) = (0.25f32, 0.8f32);
+        let nt = ntri as i32;
+        unsafe {
+            if self.dc {
+                let ncell = (CHP * CHP * CHP) as i32;
+                s.launch_builder(&self.k["k_dc_verts"])
+                    .arg(&td).arg(&cx).arg(&cy).arg(&cz).arg(&ncell).arg(&self.m_used).arg(&self.m_vid).arg(&self.dc_pos).arg(&self.dc_nrm)
+                    .arg(&self.ts_sc).arg(&self.ts_wc).arg(&self.m_planes).arg(&self.m_nplanes).arg(&tol).arg(&align)
+                    .arg(&self.m_opens).arg(&self.nopen)
+                    .arg(&mut self.m_pos).arg(&mut self.m_nrm).arg(&mut self.m_col)
+                    .launch(cfg(CHP * CHP * CHP)).map_err(err)?;
+            } else {
+                s.launch_builder(&self.k["k_mc_verts"])
+                    .arg(&td).arg(&cx).arg(&cy).arg(&cz).arg(&nsl).arg(&self.m_used).arg(&self.m_vid).arg(&self.m_field)
+                    .arg(&self.ts_sc).arg(&self.ts_wc).arg(&self.m_planes).arg(&self.m_nplanes).arg(&tol).arg(&align)
+                    .arg(&self.m_opens).arg(&self.nopen)
+                    .arg(&mut self.m_pos).arg(&mut self.m_nrm).arg(&mut self.m_col)
+                    .launch(cfg(NSLOTS)).map_err(err)?;
+            }
+            s.launch_builder(&self.k["k_mc_faces"]).arg(&nt).arg(&self.m_tri).arg(&self.m_vid).arg(&mut self.m_faces)
+                .launch(cfg(ntri)).map_err(err)?;
+        }
+        let v = s.clone_dtoh(&self.m_pos.slice(0..nv * 3)).map_err(err)?;
+        let n = s.clone_dtoh(&self.m_nrm.slice(0..nv * 3)).map_err(err)?;
+        let c = s.clone_dtoh(&self.m_col.slice(0..nv * 3)).map_err(err)?;
+        let f = s.clone_dtoh(&self.m_faces.slice(0..ntri * 3)).map_err(err)?;
+        s.synchronize().map_err(err)?;
+        // this chunk's vertices vote for wall planes (replacing its previous vote)
+        if let Some(old) = self.chunk_hist.remove(&cid) {
+            for (ax, bin) in old {
+                let h = &mut self.hist[ax as usize];
+                if (bin as usize) < h.len() { h[bin as usize] -= 1.0; }
+            }
+        }
+        let mut votes: Vec<(u8, u16)> = vec![];
+        for i in 0..nv {
+            for a in 0..3usize {
+                if (n[i * 3 + a] as i32).abs() > 102 {   // normal within ~37 degrees of the axis
+                    let bin = (v[i * 3 + a] / 5) as usize;
+                    if bin < self.hist[a].len() {
+                        self.hist[a][bin] += 1.0;
+                        votes.push((a as u8, bin as u16));
+                    }
+                }
+            }
+        }
+        self.chunk_hist.insert(cid, votes);
+        self.chunks.insert(cid, ChunkMesh { ver: prev_ver + 1, t: now, v, n, c, f });
+        Ok(())
     }
 }
 

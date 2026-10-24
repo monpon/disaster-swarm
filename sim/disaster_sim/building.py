@@ -151,7 +151,10 @@ def generate_building(cfg: SimConfig) -> Building:
     for k in range(cfg.floors):
         zl = k * cfg.story + 1
         walls, doors, rooms = [], [], []
-        _bsp(rng, x0 + 1, y0 + 1, x1 - 1, y1 - 1, 0, walls, doors, rooms, hall=(k == hall_floor))
+        if cfg.open_plan:  # one big hall per floor
+            rooms.append((x0 + 1, y0 + 1, x1 - 1, y1 - 1, "hall"))
+        else:
+            _bsp(rng, x0 + 1, y0 + 1, x1 - 1, y1 - 1, 0, walls, doors, rooms, hall=(k == hall_floor), min_room=cfg.min_room)
         for axis, c, a0, a1 in walls:
             if axis == "x":
                 vox[c, a0:a1, zl:zl + cfg.story - 1] = M.CONCRETE
@@ -179,7 +182,8 @@ def generate_building(cfg: SimConfig) -> Building:
     return b
 
 
-def _bsp(rng, x0, y0, x1, y1, depth, walls, doors, rooms, hall=False):
+def _bsp(rng, x0, y0, x1, y1, depth, walls, doors, rooms, hall=False, min_room=MIN_ROOM):
+    MIN_ROOM = min_room
     w, h = x1 - x0, y1 - y0
     can_x, can_y = w >= 2 * MIN_ROOM + 1, h >= 2 * MIN_ROOM + 1
     if hall and depth == 1:
@@ -196,21 +200,22 @@ def _bsp(rng, x0, y0, x1, y1, depth, walls, doors, rooms, hall=False):
         walls.append(("x", c, y0, y1))
         for p in _door_spots(rng, y0, y1):
             doors.append(("x", c, p))
-        _bsp(rng, x0, y0, c, y1, depth + 1, walls, doors, rooms, hall)
-        _bsp(rng, c + 1, y0, x1, y1, depth + 1, walls, doors, rooms, False)
+        _bsp(rng, x0, y0, c, y1, depth + 1, walls, doors, rooms, hall, min_room)
+        _bsp(rng, c + 1, y0, x1, y1, depth + 1, walls, doors, rooms, False, min_room)
     else:
         c = int(rng.integers(y0 + MIN_ROOM, y1 - MIN_ROOM))
         walls.append(("y", c, x0, x1))
         for p in _door_spots(rng, x0, x1):
             doors.append(("y", c, p))
-        _bsp(rng, x0, y0, x1, c, depth + 1, walls, doors, rooms, hall)
-        _bsp(rng, x0, c + 1, x1, y1, depth + 1, walls, doors, rooms, False)
+        _bsp(rng, x0, y0, x1, c, depth + 1, walls, doors, rooms, hall, min_room)
+        _bsp(rng, x0, c + 1, x1, y1, depth + 1, walls, doors, rooms, False, min_room)
 
 
 def _door_spots(rng, a0, a1) -> list[int]:
-    spots = [int(rng.integers(a0 + 2, a1 - DOOR_W - 1))]
+    lo, hi = a0 + 2, max(a1 - DOOR_W - 1, a0 + 3)  # short walls (small rooms) still get a door
+    spots = [int(rng.integers(lo, hi))]
     if a1 - a0 > 24 and rng.random() < 0.5:  # extra door on long walls makes loops
-        p = int(rng.integers(a0 + 2, a1 - DOOR_W - 1))
+        p = int(rng.integers(lo, hi))
         if abs(p - spots[0]) > DOOR_W + 3:
             spots.append(p)
     return spots
@@ -245,7 +250,7 @@ def _shafts(rng, b: Building, keepout):
             v[ring[0], ring[1], z] = M.DOORFRAME
             v[col[0], col[1], z] = M.AIR
         keepout[sx - 2:sx + 6, sy - 2:sy + 5, :] = True
-    for _ in range(int(rng.integers(1, 3))):
+    for _ in range((int(rng.integers(1, 3)) + 2 * (cfg.damage - 1)) if cfg.floors > 1 else 0):
         k = int(rng.integers(1, cfg.floors))
         z = k * cfg.story
         hx = int(rng.integers(b.x0 + 6, b.x1 - 10))
@@ -272,12 +277,12 @@ def _exterior_openings(rng, b: Building, keepout):
     # Loading docks on the ground floor (one blocked by debris inside).
     n_docks = int(rng.integers(2, 4))
     dock_sides = rng.choice([1, 2, 3], size=n_docks, replace=False)
-    blocked_i = int(rng.integers(n_docks))
+    blocked_set = set(rng.choice(n_docks, size=min(cfg.damage, n_docks), replace=False).tolist())
     for i, si in enumerate(dock_sides):
         axis, c, a0, a1, n = sides[si]
         p = int(rng.integers(a0 + 6, a1 - DOCK_W - 6))
         _carve_door(v, axis, c, p, 1, DOCK_W, DOCK_H)
-        blocked = i == blocked_i
+        blocked = i in blocked_set
         if blocked:  # rubble fills the doorway from just inside
             step = n[0] if axis == "x" else n[1]
             for depth in (1, 2):
@@ -297,7 +302,7 @@ def _exterior_openings(rng, b: Building, keepout):
         zl = k * cfg.story + 2
         for axis, c, a0, a1, n in sides:
             for p in range(a0 + 4, a1 - WINDOW_W - 3, 8):
-                broken = rng.random() < 0.22
+                broken = rng.random() < cfg.broken_windows
                 sl = (c, slice(p, p + WINDOW_W), slice(zl, zl + WINDOW_H)) if axis == "x" else \
                      (slice(p, p + WINDOW_W), c, slice(zl, zl + WINDOW_H))
                 if v[sl].min() == M.AIR:
@@ -350,12 +355,12 @@ def _clutter(rng, b: Building, keepout):
         ko = keepout[:, :, room.floor]
         rx0, ry0, rx1, ry1 = room.x0, room.y0, room.x1, room.y1
         if room.kind == "hall":
-            for _ in range(int(rng.integers(4, 9))):  # machinery
+            for _ in range(max(1, int(round(int(rng.integers(4, 9)) * cfg.clutter)))):  # machinery
                 sx, sy, sz = int(rng.integers(2, 6)), int(rng.integers(2, 6)), int(rng.integers(2, 4))
                 x, y = int(rng.integers(rx0 + 1, rx1 - sx - 1)), int(rng.integers(ry0 + 1, ry1 - sy - 1))
                 if _free_box(v, ko, x, y, z, sx, sy, sz):
                     v[x:x + sx, y:y + sy, z:z + sz] = M.STEEL
-            for _ in range(int(rng.integers(1, 4))):  # tanks
+            for _ in range(int(round(int(rng.integers(1, 4)) * min(cfg.clutter, 1.5)))):  # tanks
                 r = 1.6
                 x, y = int(rng.integers(rx0 + 3, rx1 - 3)), int(rng.integers(ry0 + 3, ry1 - 3))
                 if _free_box(v, ko, x - 2, y - 2, z, 4, 4, 3):
@@ -366,21 +371,21 @@ def _clutter(rng, b: Building, keepout):
         elif room.kind == "storage":
             along_x = (rx1 - rx0) >= (ry1 - ry0)
             if along_x:
-                for y in range(ry0 + 2, ry1 - 2, 4):
+                for y in range(ry0 + 2, ry1 - 2, max(3, int(round(4 / cfg.clutter)))):
                     for x in range(rx0 + 2, rx1 - 2):
                         if not ko[x, y] and v[x, y, z] == M.AIR:
                             v[x, y, z:z + 3] = M.SHELF
             else:
-                for x in range(rx0 + 2, rx1 - 2, 4):
+                for x in range(rx0 + 2, rx1 - 2, max(3, int(round(4 / cfg.clutter)))):
                     for y in range(ry0 + 2, ry1 - 2):
                         if not ko[x, y] and v[x, y, z] == M.AIR:
                             v[x, y, z:z + 3] = M.SHELF
         else:
-            for _ in range(int(rng.integers(1, 4))):  # desks
+            for _ in range(max(1, int(round(int(rng.integers(1, 4)) * cfg.clutter)))):  # desks
                 x, y = int(rng.integers(rx0 + 1, rx1 - 3)), int(rng.integers(ry0 + 1, ry1 - 2))
                 if _free_box(v, ko, x, y, z, 2, 1, 1):
                     v[x:x + 2, y:y + 1, z] = M.WOOD
-        if rng.random() < 0.35:
+        if rng.random() < min(0.35 * cfg.clutter * (1 + 0.5 * (cfg.damage - 1)), 0.95):
             x, y = int(rng.integers(rx0 + 2, rx1 - 2)), int(rng.integers(ry0 + 2, ry1 - 2))
             if not ko[x - 2:x + 3, y - 2:y + 3].any():
                 _pile(rng, v, x, y, z, 2, 2)

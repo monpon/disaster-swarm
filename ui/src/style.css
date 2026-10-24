@@ -618,3 +618,19 @@ kbd {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+#demo-badge {
+  position: absolute;
+  left: 50%;
+  bottom: 38px;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border-radius: 999px;
+  font: 600 11px/1.2 var(--mono, ui-monospace, monospace);
+  letter-spacing: 0.04em;
+  background: rgba(246, 224, 94, 0.14);
+  border: 1px solid rgba(246, 224, 94, 0.55);
+  color: #f6e05e;
+  z-index: 20;
+  pointer-events: none;
+}

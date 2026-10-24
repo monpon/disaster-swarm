@@ -39,6 +39,8 @@ export interface SimConfig {
   seed: number;
   n_drones: number;
   n_survivors: number;
+  preset: string;
+  known_outline: boolean;
   floors: number;
   wind_speed: number;
   wind_dir_deg: number;
@@ -51,7 +53,7 @@ export interface SimConfig {
   cam_vfov_deg: number;
   cam_range: number;
   proper_scan_range: number;
-  [key: string]: number;
+  [key: string]: number | string | boolean;
 }
 
 export type Mode =

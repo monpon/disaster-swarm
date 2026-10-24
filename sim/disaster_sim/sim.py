@@ -35,6 +35,11 @@ class Simulation:
         cfg = self.cfg
         if hasattr(self, "master"):
             self.master.close()
+            # let go of everything that holds the old GPU core, so its memory (a few GB) is freed now
+            self.master = self.camera = self.radio = self.core = None
+            self.last_frames, self.backlog, self.frame_queue = [], [], []
+            import gc
+            gc.collect()
         self.rng = np.random.default_rng(cfg.seed + 1000)
         self.b = generate_building(cfg)
         n = cfg.n_drones
@@ -48,7 +53,9 @@ class Simulation:
         self.radio = Radio(self.b, cfg, self.rng, self.core)
         self.master = MasterController(cfg, self.b.vox.shape,
                                        (self.b.x0, self.b.y0, self.b.x1, self.b.y1, self.b.top) if cfg.known_outline else None,
-                                       self.pads, self.b.base, np.random.default_rng(cfg.seed + 2000), core=self.core)
+                                       self.pads, self.b.base, np.random.default_rng(cfg.seed + 2000), core=self.core,
+                                       plan_entries=[e.to_dict() for e in self.b.entries] if cfg.plan_assist else None,
+                                       plan_vox=self.b.vox if cfg.plan_assist else None)
         self.last_frames: list = [None] * n  # most recent frame the master received per drone
         self.backlog = [deque() for _ in range(n)]  # frames waiting for radio capacity
 
@@ -284,6 +291,8 @@ class Simulation:
             "verified": self.verified_fraction(),
             "align_ok": round(self.master.map.align_ok / max(self.master.map.align_n, 1), 3),
             "align_mm": round(1000 * float(np.mean(self.master.align_dp or [0.0])), 0),
+            "align_why": [int(v) for v in getattr(self.master, "align_why", [])],
+            "align_ngood": round(float(getattr(self.master, "align_ngood", 0.0)), 1),
             "points": int(self.master.map.npts),
             "prof": {**{k: round(v, 2) for k, v in self.prof.items()}, "fuse_gpu": round(self.master.fuse_ms, 1)},
             "brakes": int(self.master.brakes),
@@ -331,6 +340,7 @@ class Simulation:
                 "grounded": bool(f.grounded[i]),
                 "frozen": bool(self.esp.failsafe[i]),
                 "holding": bool(self.esp.link_hold[i]),
+                "why": self.master.drones[i].slow_why,
                 "snr": round(float(self.master.drones[i].parent_snr), 1),
                 "slot": None if self.master.drones[i].slot is None else int(self.master.drones[i].slot["id"]),
                 "landing_auto": bool(self.esp.auto_land[i]),
