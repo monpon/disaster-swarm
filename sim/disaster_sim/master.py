@@ -708,7 +708,7 @@ class MasterController:
         pts = approach + [p for p, _ in rem]
         r.path, r.leg_path, r.leg_off = pts, pts, len(approach)
         r.yaws = self._fill_yaws(r.pos, pts, [None] * len(approach) + [y for _, y in rem])
-        r.speed = 3.0
+        r.speed = 2.4  # contact below 3 m/s bounces off the prop guards instead of crashing
         self._set_mode(r, SURVEY, t)
 
     def _track_legs(self, t: float) -> None:

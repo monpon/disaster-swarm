@@ -23,12 +23,13 @@ MU = 0.5  # truncation distance in front of the surface (m)
 BEHIND = 0.5  # band behind the surface that is still integrated (m): symmetric, so smoothing does not bias walls
 BAND_STEP = 0.1
 FREE_STEP = 0.2
-MAX_DEPTH = 7.0  # deeper depth estimates are too noisy for surfaces
+MAX_DEPTH = 10.0  # the survey looks at walls from 8 m; far samples are down-weighted by 1/d^2
 MIN_DEPTH = 0.3
 FREE_WEIGHT = 0.3  # carving counts less than a surface hit
-MIN_W = 0.2  # a voxel needs this much weight to count as observed
+MIN_W = 0.08  # a voxel needs this much weight to count as observed: one frame is enough to show a wall
 W_CAP = 64.0
 CHUNK = 32
+MESH_MIN_INTERVAL_S = 0.25  # a chunk is re-meshed at most this often
 MESH_BUDGET_S = 0.2  # GPU time per worker cycle spent re-meshing dirty chunks
 FILTER_SIGMA = 1.2  # voxels: Gaussian smoothing of the distance field before meshing
 FILTER_PAD = 3
@@ -60,6 +61,7 @@ class Surface:
         self.wc = torch.zeros(n, dtype=torch.float16, device=self.device)
         self.offs = torch.arange(-MU, BEHIND + 1e-6, BAND_STEP, device=self.device)  # band offsets (m): front is negative
         self.dirty: dict[int, None] = {}  # chunks to re-mesh, oldest first (every chunk gets its turn)
+        self.meshed_at: dict[int, float] = {}
         self.chunks: dict[int, dict] = {}  # chunk id -> {"ver", "v", "n", "c", "f"}
         self.tris = 0
         self.last_ms = 0.0
@@ -173,9 +175,14 @@ class Surface:
     # ---------------------------------------------------------------- meshing
     def _mesh_dirty(self) -> None:
         t0 = time.perf_counter()
-        while self.dirty and time.perf_counter() - t0 < MESH_BUDGET_S:
-            cid = next(iter(self.dirty))
+        now = time.monotonic()
+        for cid in list(self.dirty):
+            if time.perf_counter() - t0 > MESH_BUDGET_S:
+                break
+            if now - self.meshed_at.get(cid, -1e9) < MESH_MIN_INTERVAL_S:
+                continue  # meshed a moment ago: it keeps its place in line
             del self.dirty[cid]
+            self.meshed_at[cid] = now
             self._mesh_chunk(cid)
         self.tris = sum(len(c["f"]) // 3 for c in self.chunks.values())
 
@@ -210,7 +217,7 @@ class Surface:
         n = (min(CHUNK + 1, nx - i0), min(CHUNK + 1, ny - j0), min(CHUNK + 1, nz - k0))  # +1: shared border
         prev = self.chunks.get(cid)
         ver = (prev["ver"] if prev else 0) + 1
-        empty = {"ver": ver, "v": np.zeros(0, np.uint16), "n": np.zeros(0, np.int8), "c": np.zeros(0, np.uint8),
+        empty = {"ver": ver, "t": time.monotonic(), "v": np.zeros(0, np.uint16), "n": np.zeros(0, np.int8), "c": np.zeros(0, np.uint8),
                  "f": np.zeros(0, np.uint32)}
 
         def clear() -> None:
@@ -249,16 +256,20 @@ class Surface:
         col = self.col.view(nx, ny, nz, 3)[i0:i0 + n[0], j0:j0 + n[1], k0:k0 + n[2]][vi[:, 0], vi[:, 1], vi[:, 2]]
         origin = torch.tensor([i0, j0, k0], device=self.device, dtype=verts.dtype)
         world = (verts + origin + 0.5) * VOXEL
+        # One transfer: positions, normals and colours packed together.
+        packed = torch.cat([torch.round(world / POS_UNIT).clamp(0, 65535), torch.round(nrm * 127) + 128.0,
+                            col.float()], dim=1).to(torch.int32).cpu().numpy()
         self.chunks[cid] = {
             "ver": ver,
-            "v": torch.round(world / POS_UNIT).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16).reshape(-1),
-            "n": torch.round(nrm * 127).to(torch.int8).cpu().numpy().reshape(-1),
-            "c": col.cpu().numpy().astype(np.uint8).reshape(-1),
+            "t": time.monotonic(),
+            "v": packed[:, 0:3].astype(np.uint16).reshape(-1),
+            "n": (packed[:, 3:6] - 128).astype(np.int8).reshape(-1),
+            "c": packed[:, 6:9].astype(np.uint8).reshape(-1),
             "f": faces.to(torch.int32).cpu().numpy().astype(np.uint32).reshape(-1),
         }
 
     # ----------------------------------------------------------------- output
-    def updates(self, sent: dict[int, tuple], full: bool = False, limit: int = 6) -> list[tuple[int, dict]]:
+    def updates(self, sent: dict[int, tuple], full: bool = False, limit: int = 12, budget: int = 110_000) -> list[tuple[int, dict]]:
         """Chunks whose mesh changed since `sent` (chunk id -> (version, send order) that the
         viewers have). The chunk that has waited longest since it was last sent goes first, so
         a busy area cannot starve the rest."""
@@ -272,5 +283,23 @@ class Surface:
             if not full and len(c["f"]) == 0 and have is None:
                 continue
             stale.append((have[1] if have is not None else -1, cid, c))
-        stale.sort(key=lambda x: x[0])
-        return [(cid, c) for _, cid, c in (stale if full else stale[:limit])]
+        if full:
+            return [(cid, c) for _, cid, c in sorted(stale, key=lambda x: x[0])]
+        # Alternate between what changed most recently (so the view a drone is looking at
+        # appears at once) and what has waited longest (so nothing starves).
+        newest = sorted(stale, key=lambda x: -x[2]["t"])
+        oldest = sorted(stale, key=lambda x: x[0])
+        order, seen = [], set()
+        for a, b in zip(newest, oldest):
+            for it in (a, b):
+                if it[1] not in seen:
+                    seen.add(it[1])
+                    order.append(it)
+        out, used = [], 0
+        for _, cid, c in order:
+            size = len(c["v"]) * 2 + len(c["n"]) + len(c["c"]) + len(c["f"]) * 3
+            if out and (used + size > budget or len(out) >= limit):
+                break
+            out.append((cid, c))
+            used += size
+        return out

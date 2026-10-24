@@ -92,7 +92,7 @@ class MapStream:
         out = []
         if full:
             self.sent_chunks = {}
-        for cid, c in self.sim.master.surface.updates(self.sent_chunks, full, limit=4 if not full else 10 ** 9):
+        for cid, c in self.sim.master.surface.updates(self.sent_chunks, full, limit=12 if not full else 10 ** 9):
             self.sent_n += 1
             self.sent_chunks[cid] = (c["ver"], self.sent_n)
             nv = len(c["v"]) // 3

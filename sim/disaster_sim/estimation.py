@@ -39,6 +39,8 @@ class SimulatedVIO:
         self.sigma_yaw = cfg.vio_yaw_drift  # rad per sqrt(m) flown
         self.err_p = np.zeros((n, 3))
         self.err_yaw = np.zeros(n)
+        self.baro_bias = np.zeros(n)  # the barometer's slow offset (m)
+        self.last_t = np.full(n, -1.0)
         self.prev = [None] * n  # previous true position
         # Keyframes per drone: time, true position, estimate error then (ring buffer).
         self.kf_t = np.full((n, MAX_KEYFRAMES), -1e9)
@@ -57,6 +59,12 @@ class SimulatedVIO:
             return
         if prev is None:
             return
+        # The drone's barometer bounds the vertical drift: the estimate's height error relaxes
+        # toward the barometer's own (small, slowly wandering) offset.
+        dtk = 0.0 if self.last_t[i] < 0 else max(t - self.last_t[i], 0.0)
+        self.last_t[i] = t
+        self.baro_bias[i] = float(np.clip(self.baro_bias[i] + self.rng.normal(0.0, 0.03 * np.sqrt(dtk)), -0.4, 0.4))
+        self.err_p[i, 2] += (self.baro_bias[i] - self.err_p[i, 2]) * min(1.0, dtk / 6.0)
         step = p - prev
         dist = float(np.linalg.norm(step))
         if dist > 1e-4:
