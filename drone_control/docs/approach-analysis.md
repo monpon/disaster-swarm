@@ -36,6 +36,25 @@ the protocol, so one lost chunk (about 7 per frame) loses the frame: 5% packet l
 An earlier S3 v2 run with `readinto` produced 0% intact frames. That was a bug: MicroPython's `readinto` keeps
 reading until the buffer is full, concatenating datagrams. Do not use it for UDP.
 
+## 3a. Delivered video per path (summary of every real-drone run)
+
+The drone sends 240x320 (portrait) JPEG frames, about 11.4 KB each, at 24.6 fps. Delivered rate varies run to run
+because JPEG size varies (datagrams/s 185 to 296 at the same fps).
+
+| Path | KiB/s delivered | Datagrams/s | Bytes/frame at client | Frames intact | fps |
+|---|---|---|---|---|---|
+| Direct to drone | 244 to 418 | 185 to 296 | 11,400 | 99.6 to 100% | 24.5 to 24.6 |
+| Python relay (laptop) | 242 to 415 | 184 to 294 | 11,400 | 95.5 to 99.2% | 23.3 to 24.4 |
+| Python relay, 320x240 q60 | 170 | 126 | 7,065 | 100% | 24.6 |
+| Python relay, 240x320 q35 | 135 | 101 | 5,583 | 100% | 24.6 |
+| Python relay, 120x160 q50 | 65 | 52 | 2,714 | 100% | 24.5 |
+| ESP32-S3 v1 | 233 | 175 | n/a (most frames broken) | 19.2% | 4.6 |
+| ESP32-S3 v2 | 237 | 175 | n/a | 71.4% | 17.6 |
+| ESP32-S3 v3 | 271 to 274 | 200 to 204 | 11,543 | 86.1%, 80.3% | 21.2, 19.8 |
+
+Note: KiB/s counts every datagram that reached the client, including those of broken frames, so it overstates usable
+video on the lossy paths. Frames intact and fps are the metrics to compare.
+
 ## 3b. Throughput ceilings (1472-byte UDP datagrams)
 
 What the drone needs: 190 to 300 datagrams/s, 240 to 420 KiB/s of video (direct runs), plus 40 RC packets/s.
