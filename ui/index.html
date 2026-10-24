@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Disaster Swarm</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <main id="views">
+      <section id="view-flight" class="view">
+        <div class="view-tag"><b>LIVE FLIGHT</b><span>real world · forward cameras</span></div>
+      </section>
+      <section id="view-map" class="view">
+        <div class="view-tag map"><b>MASTER MAP</b><span id="map-stats">fused from drone uplinks</span></div>
+        <div class="legend">
+          <span id="legend-fresh"><i class="grad fresh"></i>last seen: now → <b id="legend-fresh-max">120s</b></span>
+          <span><i style="background:#262f42"></i>free</span>
+          <span><i class="grad"></i>obstacle height 0 → 42 m</span>
+          <span><i style="background:#ffb020;border-radius:50%"></i>frontier</span>
+          <span><i style="background:#3ddc97;border-radius:50%"></i>survivor</span>
+        </div>
+      </section>
+    </main>
+
+    <header id="hud">
+      <div class="brand">
+        <span id="conn" class="conn down"></span>
+        <div>
+          <h1>DISASTER SWARM</h1>
+          <p>Search &amp; rescue · central master control</p>
+        </div>
+        <span id="status-mission" class="paused">CONNECTING</span>
+      </div>
+      <div class="metrics">
+        <div class="metric"><label>Mission</label><span id="m-time">00:00</span></div>
+        <div class="metric"><label>Coverage</label><span id="m-cov">0%</span></div>
+        <div class="metric accent"><label>Survivors</label><span id="m-found">0/0</span></div>
+        <div class="metric"><label>Airborne</label><span id="m-air">0</span></div>
+        <div class="metric"><label>Lost</label><span id="m-lost">0</span></div>
+        <div class="metric"><label>Wind</label><span id="m-wind">-</span></div>
+        <div class="metric wide"><label>Freshness</label><span id="m-fresh">-</span></div>
+        <div class="metric wide"><label>Uplink</label><span id="m-link">-</span></div>
+        <div class="metric wide"><label>Sim rate</label><span id="m-rtf">-</span></div>
+      </div>
+    </header>
+
+    <aside id="left" class="panel-stack">
+      <section class="panel">
+        <h2>Fleet</h2>
+        <table id="fleet">
+          <thead><tr><th>ID</th><th>Mode</th><th>Battery</th><th class="num">Alt</th><th class="num">m/s</th></tr></thead>
+          <tbody id="fleet-body"></tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Mission progress</h2>
+        <div id="chart"></div>
+      </section>
+    </aside>
+
+    <aside id="right" class="panel-stack">
+      <section class="panel"><div id="drone-card" class="empty"></div></section>
+      <section class="panel grow">
+        <h2>Master event log</h2>
+        <ul id="events"></ul>
+      </section>
+    </aside>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
