@@ -1,9 +1,7 @@
 import * as THREE from "three";
-import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { decodeB64, type SurfaceChunk } from "../types";
 
 const POS_UNIT = 0.01; // must match sim/disaster_sim/surface.py
-const CREASE = THREE.MathUtils.degToRad(40); // smooth shading within surfaces, crisp across edges
 
 /** The master's fused surface: triangle chunks from the GX10's TSDF + marching cubes. Each
  * message replaces the mesh of the chunks it names. */
@@ -35,11 +33,11 @@ export class SurfaceLayer {
       for (let i = 0; i < v16.length; i++) pos[i] = v16[i] * POS_UNIT;
       const col = new Uint8Array(decodeB64(c.c));
       const idx = c.w ? new Uint32Array(decodeB64(c.f)) : new Uint16Array(decodeB64(c.f));
-      let g = new THREE.BufferGeometry();
+      const g = new THREE.BufferGeometry();
       g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
       g.setAttribute("color", new THREE.BufferAttribute(col, 3, true));
+      g.setAttribute("normal", new THREE.BufferAttribute(new Int8Array(decodeB64(c.n)), 3, true));
       g.setIndex(new THREE.BufferAttribute(idx, 1));
-      g = toCreasedNormals(g, CREASE);
       const mesh = new THREE.Mesh(g, this.material);
       mesh.frustumCulled = false;
       this.meshes.set(c.id, mesh);

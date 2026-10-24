@@ -117,6 +117,7 @@ export interface Metrics {
   align_ok: number; // fraction of frames the master registered against its map
   align_mm: number; // mean size of that correction (mm)
   points: number;
+  ext_cov: number; // share of the building exterior seen so far
   smoother: string; // "cuda" | "cpu"
   smooth_ms: number;
   mesh: { backend: string; tris: number; chunks: number; ms: number };
@@ -180,6 +181,7 @@ export interface SurfaceChunk {
   id: number;
   nv: number; // vertices (0 clears the chunk)
   v: string; // uint16 x,y,z in 1 cm units
+  n: string; // int8 x,y,z normal per vertex (from the smoothed distance field)
   c: string; // uint8 r,g,b per vertex
   f: string; // triangle indices (uint16, or uint32 when `w`)
   w: boolean;

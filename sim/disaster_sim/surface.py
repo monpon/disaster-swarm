@@ -20,16 +20,19 @@ import numpy as np
 
 VOXEL = 0.2  # m
 MU = 0.5  # truncation distance in front of the surface (m)
-BEHIND = 0.3  # band behind the surface that is still integrated (m)
+BEHIND = 0.5  # band behind the surface that is still integrated (m): symmetric, so smoothing does not bias walls
 BAND_STEP = 0.1
 FREE_STEP = 0.2
-MAX_DEPTH = 8.0  # deeper depth estimates are too noisy for surfaces
+MAX_DEPTH = 7.0  # deeper depth estimates are too noisy for surfaces
 MIN_DEPTH = 0.3
 FREE_WEIGHT = 0.3  # carving counts less than a surface hit
 MIN_W = 0.2  # a voxel needs this much weight to count as observed
 W_CAP = 64.0
 CHUNK = 32
 CHUNKS_PER_CYCLE = 8
+FILTER_SIGMA = 1.2  # voxels: Gaussian smoothing of the distance field before meshing
+FILTER_PAD = 3
+BLUR_WEIGHT_SAT = 0.0  # >0: voxels with more evidence count more in the blur (saturating here)
 POS_UNIT = 0.01  # streamed vertex positions are uint16 in 1 cm units
 MAX_QUEUE = 48
 BATCH = 24
@@ -172,6 +175,28 @@ class Surface:
             self._mesh_chunk(cid)
         self.tris = sum(len(c["f"]) // 3 for c in self.chunks.values())
 
+    def _smooth_field(self, vol, obs, wgt):
+        """Gaussian smoothing of the signed-distance field using only observed voxels
+        (normalised convolution), so noisy views average into one smooth, flat surface."""
+        torch = self.torch
+        if not hasattr(self, "_kern"):
+            r = torch.arange(-FILTER_PAD, FILTER_PAD + 1, device=self.device, dtype=torch.float32)
+            k = torch.exp(-r ** 2 / (2 * FILTER_SIGMA ** 2))
+            self._kern = (k / k.sum()).view(1, 1, -1)
+        k = self._kern
+        def blur(x):
+            x = x[None, None]
+            for ax in range(3):
+                shape = [1, 1, 1, 1, 1]
+                shape[2 + ax] = -1
+                x = torch.nn.functional.conv3d(x, k.view(shape), padding=[FILTER_PAD if a == ax else 0 for a in range(3)])
+            return x[0, 0]
+        m = obs.float()
+        if BLUR_WEIGHT_SAT > 0:
+            m = m * (wgt / BLUR_WEIGHT_SAT).clamp(max=1.0)
+        num, den = blur(vol * m), blur(m)
+        return torch.where((den > 0.25) & obs, num / den.clamp_min(1e-6), vol)
+
     def _sub(self, arr, i0, j0, k0, n):
         nx, ny, nz = self.dims
         return arr.view(nx, ny, nz, *arr.shape[1:])[i0:i0 + n[0], j0:j0 + n[1], k0:k0 + n[2]]
@@ -182,8 +207,18 @@ class Surface:
         cj, ci = r % self.ncy, r // self.ncy
         i0, j0, k0 = ci * CHUNK, cj * CHUNK, ck * CHUNK
         n = (min(CHUNK + 1, nx - i0), min(CHUNK + 1, ny - j0), min(CHUNK + 1, nz - k0))  # +1: shared border
-        vol = self._sub(self.tsdf, i0, j0, k0, n).float().cpu().numpy()
-        w = self._sub(self.w, i0, j0, k0, n).float().cpu().numpy()
+        pad = FILTER_PAD  # context around the chunk so smoothing is seamless across chunk borders
+        lo = (max(i0 - pad, 0), max(j0 - pad, 0), max(k0 - pad, 0))
+        hi = (min(i0 + n[0] + pad, nx), min(j0 + n[1] + pad, ny), min(k0 + n[2] + pad, nz))
+        big = (slice(lo[0], hi[0]), slice(lo[1], hi[1]), slice(lo[2], hi[2]))
+        tv = self.tsdf.view(nx, ny, nz)[big].float()
+        wv = self.w.view(nx, ny, nz)[big].float()
+        obs_t = wv >= MIN_W
+        vol_t = self._smooth_field(tv, obs_t, wv)
+        cut = (slice(i0 - lo[0], i0 - lo[0] + n[0]), slice(j0 - lo[1], j0 - lo[1] + n[1]),
+               slice(k0 - lo[2], k0 - lo[2] + n[2]))
+        vol = vol_t[cut].cpu().numpy()
+        w = wv[cut].cpu().numpy()
         obs = w >= MIN_W
         # A cube is meshed only when all 8 of its corners were observed.
         cube = (obs[:-1, :-1, :-1] & obs[1:, :-1, :-1] & obs[:-1, 1:, :-1] & obs[1:, 1:, :-1]

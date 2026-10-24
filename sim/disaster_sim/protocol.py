@@ -95,7 +95,7 @@ class MapStream:
             self.sent_chunks[cid] = c["ver"]
             nv = len(c["v"]) // 3
             wide = nv >= 65536
-            out.append({"id": int(cid), "nv": nv, "v": b64(c["v"], "<u2"), "c": b64(c["c"], "u1"),
+            out.append({"id": int(cid), "nv": nv, "v": b64(c["v"], "<u2"), "n": b64(c["n"], "i1"), "c": b64(c["c"], "u1"),
                         "f": b64(c["f"], "<u4" if wide else "<u2"), "w": bool(wide)})
         return out
 

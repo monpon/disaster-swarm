@@ -225,6 +225,7 @@ class Simulation:
             "align_ok": round(self.master.map.align_ok / max(self.master.map.align_n, 1), 3),
             "align_mm": round(1000 * float(np.mean(self.master.align_dp or [0.0])), 0),
             "points": int(self.master.map.npts),
+            "ext_cov": round(float(self.master.ext_cov), 3),
             "smoother": self.master.smoother.backend,
             "mesh": {"backend": self.master.surface.backend,
                      "tris": int(self.master.surface.tris) if self.master.surface.available else 0,

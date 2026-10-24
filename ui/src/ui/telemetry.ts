@@ -36,7 +36,8 @@ export class Telemetry {
 
   metrics(m: Metrics): void {
     $("m-time").textContent = fmtTime(m.t);
-    $("m-phase").textContent = PHASE_LABEL[m.phase] ?? m.phase;
+    $("m-phase").textContent = (PHASE_LABEL[m.phase] ?? m.phase) +
+      (m.phase === "survey" ? ` · ${(m.ext_cov * 100).toFixed(0)}% seen` : "");
     $("m-entries").textContent = `${m.entries_usable}/${m.entries}`;
     $("m-explored").textContent = `${(m.explored * 100).toFixed(1)}%`;
     $("m-scanned").textContent = `${(m.scanned * 100).toFixed(1)}%`;
