@@ -1,10 +1,8 @@
 import * as THREE from "three";
 import type { CameraModel } from "../types";
 
-/**
- * Translucent view pyramid for a drone's forward camera. The camera is gimbal-stabilized,
- * so the pyramid follows heading only and keeps a fixed downward pitch.
- */
+/** Translucent view pyramid for a drone's nose camera: rigidly attached to the airframe, so
+ * it yaws, pitches and rolls with the drone. */
 export class FrustumView {
   readonly group = new THREE.Group();
   private faces: THREE.Mesh;
@@ -12,7 +10,10 @@ export class FrustumView {
   private faceMat: THREE.MeshBasicMaterial;
   private edgeMat: THREE.LineBasicMaterial;
 
-  constructor(private cam: CameraModel, color: THREE.ColorRepresentation, opacity = 0.08) {
+  private tilt: number;
+
+  constructor(cam: CameraModel, color: THREE.ColorRepresentation, opacity = 0.07) {
+    this.tilt = cam.tilt;
     const { tanH: h, tanV: v } = cam;
     // Apex at origin, looking along +x, unit depth.
     const c = [
@@ -22,20 +23,10 @@ export class FrustumView {
       [1, h, -v],
     ];
     const pos: number[] = [];
-    for (let i = 0; i < 4; i++) {
-      const a = c[i];
-      const b = c[(i + 1) % 4];
-      pos.push(0, 0, 0, ...a, ...b);
-    }
+    for (let i = 0; i < 4; i++) pos.push(0, 0, 0, ...c[i], ...c[(i + 1) % 4]);
     const faceGeo = new THREE.BufferGeometry();
     faceGeo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-    this.faceMat = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
+    this.faceMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide });
     this.faces = new THREE.Mesh(faceGeo, this.faceMat);
     this.faces.renderOrder = 4;
 
@@ -45,7 +36,6 @@ export class FrustumView {
     edgeGeo.setAttribute("position", new THREE.Float32BufferAttribute(ep, 3));
     this.edgeMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: Math.min(1, opacity * 6) });
     this.edges = new THREE.LineSegments(edgeGeo, this.edgeMat);
-
     this.group.add(this.faces, this.edges);
   }
 
@@ -54,13 +44,10 @@ export class FrustumView {
     this.edgeMat.color.set(color);
   }
 
-  /** Place at the drone, facing `yaw`. Depth reaches the ground along the center ray, capped at range. */
-  update(pos: THREE.Vector3, yaw: number, agl: number): void {
+  update(pos: THREE.Vector3, attitude: THREE.Quaternion, depth: number): void {
     this.group.position.copy(pos);
-    this.group.rotation.set(0, 0, 0);
-    this.group.rotateZ(yaw);
-    this.group.rotateY(this.cam.pitch);
-    const depth = Math.min(this.cam.range, Math.max(agl, 1) / Math.sin(this.cam.pitch));
+    this.group.quaternion.copy(attitude);
+    if (this.tilt) this.group.rotateY(this.tilt);
     this.group.scale.setScalar(depth);
   }
 

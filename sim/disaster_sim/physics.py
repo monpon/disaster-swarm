@@ -22,6 +22,10 @@ PROP_RADIUS = 0.12
 AIR_DENSITY = 1.225
 PROP_EFFICIENCY = 0.6
 AVIONICS_W = 10.0
+BODY_RADIUS = 0.32  # frame + prop guards
+BUMP_SPEED = 3.0  # m/s; slower contacts bounce off the prop guards
+BODY_PROBES = np.array([[BODY_RADIUS, 0, 0.05], [-BODY_RADIUS, 0, 0.05], [0, BODY_RADIUS, 0.05],
+                        [0, -BODY_RADIUS, 0.05], [0, 0, 0.18]])
 
 # X configuration. Motor i at angle 45 + 90*i degrees, alternating spin.
 _ang = np.deg2rad(45 + 90 * np.arange(4))
@@ -93,6 +97,7 @@ class QuadrotorFleet:
         self.crashed = np.zeros(n, dtype=bool)
         self.grounded = np.ones(n, dtype=bool)
         self.power = np.zeros(n)
+        self.prev_pos = self.pos.copy()
         self.rot = quat_to_rot(self.quat)  # cached, refreshed whenever quat changes
 
     @property
@@ -122,6 +127,7 @@ class QuadrotorFleet:
         acc[resting] = 0.0
         domega[resting] = 0.0
 
+        self.prev_pos = self.pos.copy()
         self.vel += acc * dt
         self.pos += self.vel * dt
         self.omega += domega * dt
@@ -148,11 +154,32 @@ class QuadrotorFleet:
         self.rot = quat_to_rot(self.quat)
 
     def _contacts(self, world) -> None:
-        ground = np.zeros(self.n)
-        if world is not None:
-            inb = world.in_bounds(self.pos[:, 0], self.pos[:, 1])
-            ground = np.where(inb, world.height_at(self.pos[:, 0], self.pos[:, 1]), 0.0)
-        below = self.pos[:, 2] <= ground
+        """Collide with the voxel world (or a flat ground plane at z = 0 when world is None).
+
+        Touching down gently on any top surface grounds the drone. Body contact with a wall
+        or ceiling is a bump below BUMP_SPEED (prop guards) and a crash above it.
+        """
+        n = self.n
+        if world is None:
+            below = self.pos[:, 2] <= 0.0
+            surface = np.zeros(n)
+            body_hit = np.zeros(n, dtype=bool)
+        else:
+            foot = self.pos - np.array([0.0, 0.0, 0.02])
+            below = world.solid(foot) & (self.vel[:, 2] <= 0.0)
+            surface = np.floor(foot[:, 2]) + 1.0
+            probes = (self.pos[:, None, :] + BODY_PROBES[None, :, :]).reshape(-1, 3)
+            body_hit = world.solid(probes).reshape(n, len(BODY_PROBES)).any(axis=1)
+
+        # Body contact (walls, ceilings, edges): undo the move.
+        bump = body_hit & ~self.grounded
+        if bump.any():
+            speed = np.linalg.norm(self.vel, axis=1)
+            self.crashed |= bump & (speed > BUMP_SPEED)
+            self.pos[bump] = self.prev_pos[bump]
+            self.vel[bump] *= -0.2
+            below = below & ~bump
+
         if not below.any():
             self.grounded[:] = False
             return
@@ -162,17 +189,13 @@ class QuadrotorFleet:
             | (np.linalg.norm(self.vel[:, :2], axis=1) > 2.5)
             | (tilt_cos < 0.8)
         )
-        # Hitting a wall side-on (ground jumps up under us) is also a crash.
-        if world is not None:
-            hard |= below & (ground - self.pos[:, 2] > 0.5)
         self.crashed |= hard
-        self.pos[below, 2] = ground[below]
+        self.pos[below, 2] = surface[below]
         self.vel[below] = 0.0
         self.omega[below] = 0.0
         # Settle level on touchdown, keeping heading.
-        if below.any():
-            R = self.rot[below]
-            yaw = np.arctan2(R[:, 1, 0], R[:, 0, 0])
-            self.quat[below] = quat_from_yaw(yaw)
-            self.rot = quat_to_rot(self.quat)
+        R = self.rot[below]
+        yaw = np.arctan2(R[:, 1, 0], R[:, 0, 0])
+        self.quat[below] = quat_from_yaw(yaw)
+        self.rot = quat_to_rot(self.quat)
         self.grounded = below

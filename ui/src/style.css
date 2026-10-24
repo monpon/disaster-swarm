@@ -259,8 +259,8 @@ body {
 #right {
   right: 12px;
   bottom: 12px;
-  height: min(50vh, 520px);
-  width: 270px;
+  height: min(72vh, 760px);
+  width: 290px;
 }
 .panel {
   background: var(--panel);
@@ -509,4 +509,103 @@ kbd {
   #right {
     height: 40vh;
   }
+}
+
+/* ---------- v2: view modes, feed, labels ---------- */
+#views.mode-real #view-map,
+#views.mode-map #view-real {
+  display: none;
+}
+#views.mode-real .view,
+#views.mode-map .view {
+  border-left: none;
+}
+#cut-label {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 3;
+  font: 600 11px var(--mono);
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+#view-switch {
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
+}
+#view-switch button {
+  font: 600 11px var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+#view-switch button.on {
+  color: var(--bg);
+  background: var(--info);
+}
+.legend i.grad.tex {
+  background: linear-gradient(90deg, #a8a69e, #9e4a34, #406c9c, #e28020, #f2cc24);
+}
+.legend i.grad.qual {
+  background: linear-gradient(90deg, #ff4d4f, #e8d44d, #3ddc97);
+}
+#feed-panel.empty .feed-row {
+  display: none;
+}
+.feed-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+.feed-row canvas {
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  image-rendering: pixelated;
+  background: #000;
+  border-radius: 4px;
+  border: 1px solid var(--panel-border);
+}
+#feed-info {
+  font-size: 11px;
+  color: var(--muted);
+}
+#feed-info b.bad {
+  color: var(--bad);
+}
+.site-label,
+.floor-label,
+.entry-label {
+  font: 600 10px var(--mono);
+  color: var(--info);
+  background: rgba(10, 14, 22, 0.7);
+  border-radius: 4px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.entry-label {
+  color: #f6e05e;
+}
+.entry-label.blocked {
+  color: var(--bad);
+}
+.drone-label.nolink {
+  color: var(--bad);
+  border-style: dashed;
+}
+.drone-label.frozen {
+  color: #8fd3ff;
+  border-style: dashed;
 }

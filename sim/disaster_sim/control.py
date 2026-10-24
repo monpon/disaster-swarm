@@ -6,6 +6,7 @@ import numpy as np
 from .physics import ALLOC_INV, F_MAX, G, INERTIA, MASS, cross
 
 MAX_TILT = np.deg2rad(30)
+MAX_YAW_STEP = 1.0  # rad
 
 
 class FlightController:
@@ -59,8 +60,14 @@ class FlightController:
         thrust = (F * R[:, :, 2]).sum(axis=1)
 
         # Desired attitude from thrust direction and yaw setpoint.
+        # The yaw used here stays within MAX_YAW_STEP of the current heading: the geometric
+        # error below vanishes for 180-degree errors, so a large yaw jump could otherwise
+        # leave the vehicle stuck at a tilted false equilibrium.
         zb = F / np.sqrt((F ** 2).sum(axis=1, keepdims=True))
-        xc = np.stack([np.cos(self.yaw_sp), np.sin(self.yaw_sp), np.zeros(self.n)], axis=1)
+        yaw = np.arctan2(R[:, 1, 0], R[:, 0, 0])
+        yaw_err = (self.yaw_sp - yaw + np.pi) % (2 * np.pi) - np.pi
+        yaw_cmd = yaw + np.clip(yaw_err, -MAX_YAW_STEP, MAX_YAW_STEP)
+        xc = np.stack([np.cos(yaw_cmd), np.sin(yaw_cmd), np.zeros(self.n)], axis=1)
         yb = cross(zb, xc)
         yb /= np.sqrt((yb ** 2).sum(axis=1, keepdims=True))
         xb = cross(yb, zb)
@@ -75,8 +82,15 @@ class FlightController:
         Iw = INERTIA * omega
         tau = INERTIA * self.kp_rate * (rate_sp - omega) + cross(omega, Iw)
 
-        wrench = np.concatenate([thrust[:, None], tau], axis=1)
-        f = wrench @ ALLOC_INV.T
-        f = np.clip(f, 0.0, F_MAX)
+        # Mixer with yaw de-prioritized (as in real flight stacks): thrust and roll/pitch
+        # torques are allocated first; yaw only gets the motor headroom that is left, so a
+        # big heading change can never starve attitude control and tip the vehicle.
+        zeros = np.zeros_like(thrust)
+        f_rp = np.stack([thrust, tau[:, 0], tau[:, 1], zeros], axis=1) @ ALLOC_INV.T
+        f_yaw = np.stack([zeros, zeros, zeros, tau[:, 2]], axis=1) @ ALLOC_INV.T
+        up = np.where(f_yaw > 1e-9, (F_MAX - f_rp) / np.maximum(f_yaw, 1e-9), np.inf)
+        down = np.where(f_yaw < -1e-9, f_rp / np.maximum(-f_yaw, 1e-9), np.inf)
+        s_yaw = np.clip(np.minimum(up, down).min(axis=1), 0.0, 1.0)
+        f = np.clip(f_rp + s_yaw[:, None] * f_yaw, 0.0, F_MAX)
         f[~self.armed] = 0.0
         fleet.motor_cmd = f

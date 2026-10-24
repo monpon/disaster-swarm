@@ -2,16 +2,23 @@ import GUI from "lil-gui";
 import type { SimSocket } from "../net";
 import type { SimConfig } from "../types";
 import type { Layers } from "../scene/drones";
+import type { ColorMode } from "../scene/mapview";
+
+export type ViewMode = "real" | "map" | "split";
 
 export interface ViewSettings extends Layers {
-  fog: boolean;
-  truth: boolean;
-  droneScale: number;
-  syncCameras: boolean;
-  frontiers: boolean;
-  freshMap: boolean;
-  freshFlight: boolean;
+  view: ViewMode;
+  floor: string; // "all" | "roof off" | "F1".."Fn"
+  mapColor: ColorMode;
   staleAfter: number;
+  droneScale: number;
+  pointSize: number;
+  links: boolean;
+  mesh: boolean;
+  shell: boolean;
+  targets: boolean;
+  entries: boolean;
+  survivorsTruth: boolean;
 }
 
 export interface ControlHooks {
@@ -23,37 +30,41 @@ export interface ControlHooks {
 export class ControlPanel {
   readonly gui: GUI;
   readonly view: ViewSettings = {
+    view: "split",
+    floor: "all",
+    mapColor: "texture",
+    staleAfter: 120,
+    droneScale: 2.5,
+    pointSize: 0.3,
     paths: true,
-    footprints: true,
-    links: true,
+    frustums: true,
+    frustumDepth: 5,
     trails: true,
     labels: true,
-    fog: false,
-    truth: true,
-    droneScale: 6,
-    syncCameras: true,
-    frontiers: true,
-    freshMap: true,
-    freshFlight: false,
-    staleAfter: 120,
+    links: true,
+    mesh: true,
+    shell: true,
+    targets: true,
+    entries: true,
+    survivorsTruth: true,
   };
   private run = { speed: 1, playing: true };
   private scenario = {
     seed: 1,
-    n_drones: 6,
-    n_survivors: 15,
+    n_drones: 16,
+    n_survivors: 20,
+    battery_wh: 20,
     wind_speed: 2,
     wind_dir_deg: 30,
-    gust_strength: 1,
-    link_latency: 0.2,
-    link_dropout: 0.05,
-    battery_wh: 15,
-    cam_pitch_deg: 35,
+    gust_strength: 0.8,
+    link_dropout: 0.02,
   };
   private playCtrl;
+  private floorCtrl;
 
-  constructor(private net: SimSocket, hooks: ControlHooks) {
-    this.gui = new GUI({ title: "Mission control", width: 280 });
+  constructor(private net: SimSocket, private hooks: ControlHooks) {
+    this.gui = new GUI({ title: "Mission control", width: 270 });
+    const emit = () => hooks.onView(this.view);
 
     const sim = this.gui.addFolder("Simulation");
     const actions = {
@@ -70,37 +81,54 @@ export class ControlPanel {
     sim.add(this.run, "speed", [0.25, 0.5, 1, 2, 4, 8]).name("Speed ×").onChange((v: number) => net.control("speed", { value: v }));
     sim.add(actions, "step").name("Step 0.5 s");
     sim.add(actions, "reset").name("↺ Reset mission");
-    sim.add(actions, "randomize").name("🎲 New random city");
+    sim.add(actions, "randomize").name("🎲 New random building");
 
     const sc = this.gui.addFolder("Scenario (applies on reset)");
     sc.add(this.scenario, "seed", 0, 9999, 1);
-    sc.add(this.scenario, "n_drones", 1, 16, 1).name("drones");
+    sc.add(this.scenario, "n_drones", 1, 32, 1).name("drones");
     sc.add(this.scenario, "n_survivors", 1, 40, 1).name("survivors");
     sc.add(this.scenario, "battery_wh", 5, 60, 1).name("battery (Wh)");
-    sc.add(this.scenario, "cam_pitch_deg", 10, 80, 1).name("camera tilt (°)");
     sc.add(this.scenario, "wind_speed", 0, 10, 0.5).name("wind (m/s)");
     sc.add(this.scenario, "wind_dir_deg", 0, 360, 5).name("wind dir (°)");
     sc.add(this.scenario, "gust_strength", 0, 4, 0.25).name("gusts");
-    sc.add(this.scenario, "link_latency", 0, 2, 0.05).name("link latency (s)");
-    sc.add(this.scenario, "link_dropout", 0, 0.6, 0.01).name("packet loss");
+    sc.add(this.scenario, "link_dropout", 0, 0.5, 0.01).name("packet loss");
     sc.close();
 
     const vw = this.gui.addFolder("View");
-    const emit = () => hooks.onView(this.view);
-    vw.add(this.view, "syncCameras").name("sync both cameras").onChange(emit);
-    vw.add(this.view, "freshMap").name("freshness overlay (map)").onChange(emit);
-    vw.add(this.view, "freshFlight").name("freshness overlay (flight)").onChange(emit);
-    vw.add(this.view, "staleAfter", 15, 600, 5).name("red after (s)").onChange(emit);
-    vw.add(this.view, "droneScale", 1, 15, 0.5).name("drone scale").onChange(emit);
-    vw.add(this.view, "footprints").name("camera frustums").onChange(emit);
+    vw.add(this.view, "view", { "Real building": "real", "Master map": "map", "Split": "split" }).name("view (Tab)").onChange(emit);
+    this.floorCtrl = vw.add(this.view, "floor", ["all", "roof off", "F1", "F2", "F3"]).name("cutaway (F)").onChange(emit);
+    vw.add(this.view, "mapColor", { "Texture (observed color)": "texture", "Scan quality": "quality", "Freshness": "freshness" })
+      .name("map coloring (C)")
+      .onChange(emit);
+    vw.add(this.view, "staleAfter", 15, 600, 5).name("stale after (s)").onChange(emit);
+    vw.add(this.view, "pointSize", 0.05, 1, 0.05).name("map point size (m)").onChange(emit);
+    vw.add(this.view, "droneScale", 1, 8, 0.5).name("drone scale").onChange(emit);
+    vw.add(this.view, "frustums").name("camera frustums").onChange(emit);
+    vw.add(this.view, "frustumDepth", 1, 25, 0.5).name("frustum depth (m)").onChange(emit);
     vw.add(this.view, "paths").name("planned paths").onChange(emit);
-    vw.add(this.view, "frontiers").name("frontier targets (map)").onChange(emit);
-    vw.add(this.view, "links").name("uplinks to master").onChange(emit);
+    vw.add(this.view, "links").name("routes to master").onChange(emit);
+    vw.add(this.view, "mesh").name("peer-to-peer mesh").onChange(emit);
     vw.add(this.view, "trails").onChange(emit);
     vw.add(this.view, "labels").onChange(emit);
-    vw.add(this.view, "truth").name("survivors (truth)").onChange(emit);
-    vw.add(this.view, "fog").name("fog in flight view").onChange(emit);
-    vw.add({ overview: () => hooks.onOverview() }, "overview").name("Overview camera");
+    vw.add(this.view, "shell").name("interior shell (map)").onChange(emit);
+    vw.add(this.view, "targets").name("frontier targets (map)").onChange(emit);
+    vw.add(this.view, "entries").name("entry points (map)").onChange(emit);
+    vw.add(this.view, "survivorsTruth").name("survivors (truth)").onChange(emit);
+    vw.add({ overview: () => hooks.onOverview() }, "overview").name("Overview camera (O)");
+  }
+
+  setFloors(n: number): void {
+    const opts = ["all", "roof off", ...Array.from({ length: n }, (_, i) => `F${i + 1}`)];
+    this.floorCtrl.options(opts).name("cutaway (F)").onChange(() => this.hooks.onView(this.view));
+    if (!opts.includes(this.view.floor)) this.view.floor = "all";
+    this.floorCtrl.updateDisplay();
+  }
+
+  cycle<K extends "view" | "floor" | "mapColor">(key: K, options: ViewSettings[K][]): void {
+    const i = options.indexOf(this.view[key]);
+    this.view[key] = options[(i + 1) % options.length];
+    this.gui.controllersRecursive().forEach((c) => c.updateDisplay());
+    this.hooks.onView(this.view);
   }
 
   togglePlay(): void {
@@ -117,7 +145,6 @@ export class ControlPanel {
     this.net.control("reset", { config: this.scenario });
   }
 
-  /** Reflect server state (e.g. after reconnecting or another client's change). */
   syncFromServer(cfg: SimConfig | null, running: boolean, speed: number): void {
     if (cfg) {
       for (const k of Object.keys(this.scenario) as (keyof typeof this.scenario)[]) {

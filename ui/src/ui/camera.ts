@@ -2,9 +2,7 @@ import * as THREE from "three";
 import type { Stage } from "../scene/setup";
 import type { SwarmView } from "../scene/drones";
 
-const OVERVIEW_POS = new THREE.Vector3(-170, -210, 170);
-const OVERVIEW_TARGET = new THREE.Vector3(0, 0, 0);
-const FOLLOW_OFFSET = new THREE.Vector3(-22, -26, 16);
+const FOLLOW_OFFSET = new THREE.Vector3(-9, -11, 7);
 const FLY_MS = 900;
 
 interface Flight {
@@ -20,39 +18,43 @@ export class CameraRig {
   private flight: Flight | null = null;
   private raycaster = new THREE.Raycaster();
   private down = { x: 0, y: 0 };
+  overviewPos = new THREE.Vector3(30, -40, 95);
+  overviewTarget = new THREE.Vector3(96, 64, 4);
 
   constructor(
     private stage: Stage,
-    private swarm: SwarmView,
+    private swarms: SwarmView[],
     private onSelect: (id: number | null) => void,
+    others: Stage[] = [],
   ) {
-    const el = stage.renderer.domElement;
-    el.addEventListener("pointerdown", (e) => (this.down = { x: e.clientX, y: e.clientY }));
-    el.addEventListener("pointerup", (e) => {
-      if (Math.hypot(e.clientX - this.down.x, e.clientY - this.down.y) > 4) return;
-      this.pick(e);
-    });
-    el.addEventListener("dblclick", (e) => {
-      if (!this.pickId(e)) this.unfollow();
-    });
+    for (const st of [stage, ...others]) {
+      const el = st.renderer.domElement;
+      el.addEventListener("pointerdown", (e) => (this.down = { x: e.clientX, y: e.clientY }));
+      el.addEventListener("pointerup", (e) => {
+        if (Math.hypot(e.clientX - this.down.x, e.clientY - this.down.y) > 4) return;
+        const id = this.pickId(e, el, st.camera);
+        if (id !== null) this.follow(id);
+      });
+      el.addEventListener("dblclick", (e) => {
+        if (this.pickId(e, el, st.camera) === null) this.unfollow();
+      });
+    }
   }
 
-  private pickId(e: MouseEvent): number | null {
-    const rect = this.stage.renderer.domElement.getBoundingClientRect();
+  private pickId(e: MouseEvent, el: HTMLCanvasElement, camera: THREE.Camera): number | null {
+    const rect = el.getBoundingClientRect();
     const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
-    this.raycaster.setFromCamera(ndc, this.stage.camera);
-    const hit = this.raycaster.intersectObjects(this.swarm.hitTargets(), false)[0];
-    return hit ? (hit.object.userData.droneId as number) : null;
-  }
-
-  private pick(e: MouseEvent): void {
-    const id = this.pickId(e);
-    if (id !== null) this.follow(id);
+    this.raycaster.setFromCamera(ndc, camera);
+    for (const s of this.swarms) {
+      const hit = this.raycaster.intersectObjects(s.hitTargets(), false)[0];
+      if (hit) return hit.object.userData.droneId as number;
+    }
+    return null;
   }
 
   follow(id: number): void {
     this.following = id;
-    this.swarm.select(id);
+    this.swarms.forEach((s) => s.select(id));
     this.onSelect(id);
     const { camera, controls } = this.stage;
     this.flight = { fromPos: camera.position.clone(), fromTarget: controls.target.clone(), t0: performance.now() };
@@ -63,20 +65,26 @@ export class CameraRig {
     this.flight = null;
   }
 
-  overview(): void {
+  overview(immediate = false): void {
     this.following = null;
     const { camera, controls } = this.stage;
+    if (immediate) {
+      camera.position.copy(this.overviewPos);
+      controls.target.copy(this.overviewTarget);
+      this.flight = null;
+      return;
+    }
     this.flight = {
       fromPos: camera.position.clone(),
       fromTarget: controls.target.clone(),
       t0: performance.now(),
-      toFixed: { pos: OVERVIEW_POS.clone(), target: OVERVIEW_TARGET.clone() },
+      toFixed: { pos: this.overviewPos.clone(), target: this.overviewTarget.clone() },
     };
   }
 
   update(): void {
     const { camera, controls } = this.stage;
-    const view = this.following !== null ? this.swarm.get(this.following) : undefined;
+    const view = this.following !== null ? this.swarms[0].get(this.following) : undefined;
     if (this.following !== null && !view) this.following = null;
 
     if (this.flight) {
@@ -90,7 +98,6 @@ export class CameraRig {
       }
       if (k >= 1) this.flight = null;
     } else if (view) {
-      // Keep the user's orbit offset while translating with the drone.
       const delta = view.pos.clone().sub(controls.target);
       controls.target.add(delta);
       camera.position.add(delta);

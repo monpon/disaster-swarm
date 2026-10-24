@@ -5,13 +5,13 @@ import { FrustumView } from "./frustum";
 
 const ARM = 0.25;
 const MAX_PATH_POINTS = 64;
-const TRAIL_POINTS = 240;
+const TRAIL_POINTS = 300;
 const INTERP_DELAY_MS = 60;
 
 export interface Layers {
   paths: boolean;
-  footprints: boolean;
-  links: boolean;
+  frustums: boolean;
+  frustumDepth: number;
   trails: boolean;
   labels: boolean;
 }
@@ -30,13 +30,10 @@ class DroneView {
   readonly pos = new THREE.Vector3();
   readonly quat = new THREE.Quaternion();
   private rotors: THREE.Mesh[] = [];
-  private led: THREE.Mesh;
   private ledMat: THREE.MeshBasicMaterial;
   private frustum: FrustumView;
   private path: THREE.Line;
   private pathMat: THREE.LineDashedMaterial;
-  private link: THREE.Line;
-  private linkMat: THREE.LineBasicMaterial;
   private trail: THREE.Line;
   private trailBuf = new Float32Array(TRAIL_POINTS * 3);
   private trailCount = 0;
@@ -53,13 +50,11 @@ class DroneView {
     this.state = s;
     const color = MODE_COLORS[s.mode];
 
-    // --- body model (real dimensions, scaled up for visibility)
     const frame = new THREE.MeshStandardMaterial({ color: "#d9dee8", roughness: 0.5, metalness: 0.2 });
     const dark = new THREE.MeshStandardMaterial({ color: "#272c36", roughness: 0.6 });
     const hub = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.16, 0.08), frame);
     hub.castShadow = true;
     this.body.add(hub);
-    // Forward-facing camera pod on the nose (lens tinted so heading reads at a glance).
     const pod = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 0.06), dark);
     pod.position.set(0.14, 0, -0.03);
     const lens = new THREE.Mesh(
@@ -74,9 +69,9 @@ class DroneView {
       arm.position.set((Math.cos(a) * ARM) / 2, (Math.sin(a) * ARM) / 2, 0);
       arm.rotation.z = a;
       this.body.add(arm);
-      const motor = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.04, 10).rotateX(Math.PI / 2), dark);
-      motor.position.set(Math.cos(a) * ARM, Math.sin(a) * ARM, 0.02);
-      this.body.add(motor);
+      const guard = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.008, 6, 24), dark);
+      guard.position.set(Math.cos(a) * ARM, Math.sin(a) * ARM, 0.045);
+      this.body.add(guard);
       const rotor = new THREE.Mesh(
         new THREE.BoxGeometry(0.24, 0.022, 0.004),
         new THREE.MeshStandardMaterial({ color: "#aab3c5", transparent: true, opacity: 0.85 }),
@@ -86,9 +81,9 @@ class DroneView {
       this.body.add(rotor);
     }
     this.ledMat = new THREE.MeshBasicMaterial({ color });
-    this.led = new THREE.Mesh(new THREE.SphereGeometry(0.035, 10, 8), this.ledMat);
-    this.led.position.set(0, 0, 0.06);
-    this.body.add(this.led);
+    const led = new THREE.Mesh(new THREE.SphereGeometry(0.035, 10, 8), this.ledMat);
+    led.position.set(0, 0, 0.06);
+    this.body.add(led);
     this.body.scale.setScalar(scale);
 
     this.halo = new THREE.Mesh(
@@ -98,43 +93,30 @@ class DroneView {
     this.halo.visible = false;
     this.body.add(this.halo);
 
-    // Picking proxy (unscaled world size, generous radius).
-    this.hit = new THREE.Mesh(new THREE.SphereGeometry(4, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
+    this.hit = new THREE.Mesh(new THREE.SphereGeometry(1.5, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
     this.hit.userData.droneId = id;
 
-    // --- forward camera view frustum
     this.frustum = new FrustumView(cam, color);
 
-    // --- planned path (dashed), uplink to master, flown trail
     const pathGeo = new THREE.BufferGeometry();
     pathGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_PATH_POINTS * 3), 3));
-    this.pathMat = new THREE.LineDashedMaterial({ color, dashSize: 2, gapSize: 1.5, transparent: true, opacity: 0.8 });
+    this.pathMat = new THREE.LineDashedMaterial({ color, dashSize: 0.8, gapSize: 0.5, transparent: true, opacity: 0.85 });
     this.path = new THREE.Line(pathGeo, this.pathMat);
     this.path.frustumCulled = false;
-
-    const linkGeo = new THREE.BufferGeometry();
-    linkGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
-    this.linkMat = new THREE.LineBasicMaterial({ color: "#5ec8ff", transparent: true, opacity: 0.18 });
-    this.link = new THREE.Line(linkGeo, this.linkMat);
-    this.link.frustumCulled = false;
 
     const trailGeo = new THREE.BufferGeometry();
     trailGeo.setAttribute("position", new THREE.BufferAttribute(this.trailBuf, 3));
     trailGeo.setDrawRange(0, 0);
-    this.trail = new THREE.Line(
-      trailGeo,
-      new THREE.LineBasicMaterial({ color: "#d9e2f2", transparent: true, opacity: 0.25 }),
-    );
+    this.trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color: "#d9e2f2", transparent: true, opacity: 0.25 }));
     this.trail.frustumCulled = false;
 
-    // --- label
     this.labelEl = document.createElement("div");
     this.labelEl.className = "drone-label";
     this.labelEl.textContent = `D${id}`;
     this.label = new CSS2DObject(this.labelEl);
     this.label.center.set(0.5, 1.6);
 
-    parent.add(this.body, this.hit, this.frustum.group, this.path, this.link, this.trail);
+    parent.add(this.body, this.hit, this.frustum.group, this.path, this.trail);
     this.body.add(this.label);
     this.push(s, performance.now());
   }
@@ -146,15 +128,18 @@ class DroneView {
     this.state = s;
     if (modeChanged) {
       const c = new THREE.Color(MODE_COLORS[s.mode]);
-      this.ledMat.color.copy(c);
       this.frustum.setColor(c);
       this.pathMat.color.copy(c);
     }
     this.labelEl.style.borderColor = MODE_COLORS[s.mode];
+    this.labelEl.textContent = s.mode === "relay" ? `D${this.id} ⟟` : `D${this.id}`;
     this.labelEl.classList.toggle("crashed", s.crashed);
+    this.labelEl.classList.toggle("nolink", !s.crashed && !s.grounded && s.link <= 0);
+    this.labelEl.classList.toggle("frozen", s.frozen);
+    if (s.frozen) this.labelEl.textContent = `D${this.id} ❄`;
   }
 
-  update(now: number, dt: number, antenna: THREE.Vector3, layers: Layers): void {
+  update(now: number, dt: number, layers: Layers): void {
     if (!this.prev || !this.next) return;
     const rt = now - INTERP_DELAY_MS;
     const span = Math.max(this.next.t - this.prev.t, 1);
@@ -173,12 +158,12 @@ class DroneView {
     this.body.quaternion.copy(this.quat);
     this.hit.position.copy(this.pos);
 
-    this.spin += dt * (s.crashed ? 0 : 20 + 140 * s.throttle);
+    this.spin += dt * (s.crashed || s.grounded ? 0 : 20 + 140 * s.throttle);
     this.rotors.forEach((r, i) => (r.rotation.z = (i % 2 ? -1 : 1) * this.spin + i));
 
-    const showFoot = layers.footprints && s.cam_on;
-    this.frustum.group.visible = showFoot;
-    if (showFoot) this.frustum.update(this.pos, this.yaw(), s.agl);
+    const showFrustum = layers.frustums && !s.grounded && !s.crashed;
+    this.frustum.group.visible = showFrustum;
+    if (showFrustum) this.frustum.update(this.pos, this.quat, layers.frustumDepth);
 
     this.path.visible = layers.paths && s.path.length > 0;
     if (this.path.visible) {
@@ -189,16 +174,6 @@ class DroneView {
       attr.needsUpdate = true;
       this.path.geometry.setDrawRange(0, n + 1);
       this.path.computeLineDistances();
-    }
-
-    const connected = !s.crashed && s.link_age !== null && s.link_age < 2;
-    this.link.visible = layers.links && connected && !s.grounded;
-    if (this.link.visible) {
-      const attr = this.link.geometry.getAttribute("position") as THREE.BufferAttribute;
-      attr.setXYZ(0, this.pos.x, this.pos.y, this.pos.z);
-      attr.setXYZ(1, antenna.x, antenna.y, antenna.z);
-      attr.needsUpdate = true;
-      this.linkMat.opacity = 0.08 + 0.25 * Math.max(0, 1 - (s.link_age ?? 0) / 1.0);
     }
 
     this.trail.visible = layers.trails;
@@ -217,11 +192,10 @@ class DroneView {
 
     this.label.visible = layers.labels;
     this.ledMat.color.setStyle(
-      s.crashed ? MODE_COLORS.crashed : (Math.floor(now / 400) % 2 === 0 || s.grounded ? MODE_COLORS[s.mode] : "#111111"),
+      s.crashed ? MODE_COLORS.crashed : Math.floor(now / 400) % 2 === 0 || s.grounded ? MODE_COLORS[s.mode] : "#111111",
     );
   }
 
-  /** Heading from the interpolated attitude. */
   yaw(): number {
     const q = this.quat;
     return yawOf([q.w, q.x, q.y, q.z]);
@@ -239,8 +213,8 @@ class DroneView {
   dispose(parent: THREE.Group): void {
     this.body.remove(this.label);
     this.labelEl.remove();
-    parent.remove(this.body, this.hit, this.frustum.group, this.path, this.link, this.trail);
-    for (const o of [this.body, this.hit, this.path, this.link, this.trail]) {
+    parent.remove(this.body, this.hit, this.frustum.group, this.path, this.trail);
+    for (const o of [this.body, this.hit, this.path, this.trail]) {
       o.traverse((c) => (c as THREE.Mesh).geometry?.dispose());
     }
     this.frustum.dispose();
@@ -250,9 +224,9 @@ class DroneView {
 export class SwarmView {
   readonly group = new THREE.Group();
   private views = new Map<number, DroneView>();
-  scale = 6;
+  scale = 2.5;
   selected: number | null = null;
-  camera: CameraModel = { pitch: 0.61, tanH: 1, tanV: 0.58, range: 60 };
+  camera: CameraModel = { tanH: 1, tanV: 0.62, range: 25, tilt: 0 };
 
   sync(states: DroneState[]): void {
     const now = performance.now();
@@ -278,9 +252,9 @@ export class SwarmView {
     this.selected = null;
   }
 
-  update(dt: number, antenna: THREE.Vector3, layers: Layers): void {
+  update(dt: number, layers: Layers): void {
     const now = performance.now();
-    for (const v of this.views.values()) v.update(now, dt, antenna, layers);
+    for (const v of this.views.values()) v.update(now, dt, layers);
   }
 
   setScale(scale: number): void {
@@ -295,6 +269,12 @@ export class SwarmView {
 
   get(id: number): DroneView | undefined {
     return this.views.get(id);
+  }
+
+  positions(): Map<number, THREE.Vector3> {
+    const out = new Map<number, THREE.Vector3>();
+    for (const [id, v] of this.views) out.set(id, v.pos);
+    return out;
   }
 
   hitTargets(): THREE.Object3D[] {

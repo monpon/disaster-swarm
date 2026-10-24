@@ -1,14 +1,18 @@
 export type Vec3 = [number, number, number];
 
-export interface Box {
-  cx: number;
-  cy: number;
-  sx: number;
-  sy: number;
+export interface PaletteEntry {
+  id: number;
+  name: string;
+  rgb: [number, number, number];
+}
+
+export interface TrueEntry {
+  kind: string;
+  center: Vec3;
+  normal: Vec3;
+  w: number;
   h: number;
-  yaw: number;
-  tilt: number;
-  kind: "building" | "collapsed" | "rubble";
+  blocked: boolean;
 }
 
 export interface Survivor {
@@ -18,42 +22,51 @@ export interface Survivor {
   z: number;
 }
 
-export interface WorldInfo {
-  size: number;
-  cell: number;
-  n: number;
-  base: [number, number];
-  boxes: Box[];
+export interface BuildingInfo {
+  shape: Vec3;
+  vox: string; // base64 zlib-compressed uint8 material ids, C-order [x][y][z]
+  bbox: [number, number, number, number, number]; // x0, y0, x1, y1, roof z
+  story: number;
+  floors: number;
+  palette: PaletteEntry[];
+  entries: TrueEntry[];
   survivors: Survivor[];
+  base: Vec3;
+  pads: [number, number][];
 }
 
 export interface SimConfig {
   seed: number;
   n_drones: number;
+  n_survivors: number;
+  floors: number;
   wind_speed: number;
   wind_dir_deg: number;
   gust_strength: number;
   link_latency: number;
   link_dropout: number;
-  n_survivors: number;
   battery_wh: number;
-  cam_pitch_deg: number;
+  cam_mount_tilt_deg: number;
   cam_hfov_deg: number;
   cam_vfov_deg: number;
   cam_range: number;
+  proper_scan_range: number;
   [key: string]: number;
 }
 
 export type Mode =
   | "idle"
   | "takeoff"
+  | "survey"
+  | "wait"
+  | "enter"
   | "explore"
   | "investigate"
+  | "relay"
   | "rtb"
   | "landing"
   | "charging"
-  | "crashed"
-  | "done";
+  | "crashed";
 
 export interface DroneState {
   id: number;
@@ -64,42 +77,57 @@ export interface DroneState {
   power: number;
   throttle: number;
   mode: Mode;
-  avoiding: boolean;
-  holding: boolean;
   crashed: boolean;
   grounded: boolean;
-  cam_on: boolean;
-  agl: number;
-  cruise_alt: number;
-  target: Vec3 | null;
+  avoiding: boolean;
+  returning: boolean;
+  frozen: boolean; // lost link: holding position until a relay reaches it
+  link: number; // Mbps end-to-end
+  hops: number;
+  route: number[]; // node ids from this drone to the base (-1)
+  frames: [number, number]; // delivered, dropped
+  backlog: number;
   path: Vec3[];
-  link_age: number | null;
+  serves: number | null;
 }
 
 export interface Metrics {
   t: number;
-  coverage: number;
+  phase: "survey" | "interior" | "complete";
+  explored: number;
+  scanned: number;
+  entries: number;
+  entries_usable: number;
   found: number;
   survivors: number;
   candidates: number;
   airborne: number;
   crashed: number;
+  relays: number;
   avg_soc: number;
-  uplink_kb: number;
-  packet_loss: number;
+  frames_ok: number;
+  frames_dropped: number;
+  radio_mb: number;
+  mapped_voxels: number;
   wind: [number, number];
-  mission_done: boolean;
-  mean_age: number;
-  stale_frac: number;
   running: boolean;
   speed: number;
   rtf: number;
 }
 
+export interface MapEntry {
+  id: number;
+  center: Vec3;
+  normal: Vec3;
+  w: number;
+  h: number;
+  side: string;
+  blocked: boolean;
+}
+
 export interface Candidate {
   id: number;
-  x: number;
-  y: number;
+  pos: Vec3;
   n: number;
   confirmed: boolean;
   dismissed: boolean;
@@ -112,32 +140,47 @@ export interface SimEvent {
   level: "info" | "warn" | "error" | "success";
 }
 
-export interface MapCells {
-  idx: number[];
-  s: number[];
-  h: number[];
+/** Map voxel deltas: parallel base64 arrays. */
+export interface MapDeltas {
+  idx: string; // int32 flat voxel index (occupied voxels, new or changed)
+  mat: string; // uint8 classified material
+  rgb: string; // uint16 rgb565 mean observed color
+  q: string; // uint8 best scan quality * 255
+  free: string; // int32 voxels now observed free
+  n: number;
+  pts: string; // uint16 x,y,z in POINT_UNIT (5 cm) units, new points only
+  pcol: string; // uint8 r,g,b per new point
+  np: number;
+  ptotal: number;
 }
 
-export type HistoryPoint = [number, number, number]; // t, coverage, confirmed
+export interface SeenDeltas {
+  idx: string; // int32
+  t: string; // uint16 half-seconds + 1
+}
+
+export type HistoryPoint = [number, number, number, number]; // t, explored, scanned, confirmed
 
 export interface WorldMessage {
   type: "world";
-  world: WorldInfo;
+  building: BuildingInfo;
+  materials: string[];
   config: SimConfig;
-  pads: [number, number][];
 }
 
 export interface StateMessage {
   type: "state";
   drones: DroneState[];
   metrics: Metrics;
-  map: MapCells;
+  map: MapDeltas;
+  entries: MapEntry[];
   candidates: Candidate[];
   found: number[];
-  frontiers: [number, number, number][]; // x, y, gain
+  mesh: [number, number, number][]; // node a, node b (-1 = base), Mbps
+  targets: [number, number, number, number][]; // x, y, z, kind (0 frontier, 1 surface)
   events: SimEvent[];
   history: HistoryPoint | null;
-  seen?: string; // base64 uint16 last-seen grid, sent at 2 Hz
+  seen?: SeenDeltas;
 }
 
 export interface SnapshotMessage extends Omit<StateMessage, "type" | "history"> {
@@ -145,22 +188,35 @@ export interface SnapshotMessage extends Omit<StateMessage, "type" | "history"> 
   history: HistoryPoint[];
 }
 
-export type ServerMessage = WorldMessage | StateMessage | SnapshotMessage;
+export interface FeedMessage {
+  type: "feed";
+  drone: number;
+  t: number | null;
+  age?: number;
+  w?: number;
+  h?: number;
+  rgb?: string;
+  depth?: string;
+  frames?: [number, number];
+  backlog?: number;
+}
+
+export type ServerMessage = WorldMessage | StateMessage | SnapshotMessage | FeedMessage;
 
 export interface CameraModel {
-  pitch: number; // radians below horizon
   tanH: number;
   tanV: number;
   range: number;
+  tilt: number; // fixed mount tilt below the nose (rad)
 }
 
 export function cameraModel(cfg: SimConfig | null): CameraModel {
   const deg = Math.PI / 180;
   return {
-    pitch: (cfg?.cam_pitch_deg ?? 35) * deg,
     tanH: Math.tan(((cfg?.cam_hfov_deg ?? 90) * deg) / 2),
-    tanV: Math.tan(((cfg?.cam_vfov_deg ?? 60) * deg) / 2),
-    range: cfg?.cam_range ?? 60,
+    tanV: Math.tan(((cfg?.cam_vfov_deg ?? 64) * deg) / 2),
+    range: cfg?.cam_range ?? 25,
+    tilt: (cfg?.cam_mount_tilt_deg ?? 0) * deg,
   };
 }
 
@@ -170,14 +226,24 @@ export function yawOf(q: [number, number, number, number]): number {
   return Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
 }
 
+export function decodeB64(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
 export const MODE_COLORS: Record<Mode, string> = {
   idle: "#8b93a7",
   takeoff: "#5ec8ff",
+  survey: "#4fd1c5",
+  wait: "#a0aec0",
+  enter: "#f6e05e",
   explore: "#3ddc97",
   investigate: "#ffb020",
+  relay: "#ff7ad9",
   rtb: "#b48cff",
   landing: "#8f7dff",
   charging: "#4a90e2",
   crashed: "#ff4d4f",
-  done: "#9be7c4",
 };

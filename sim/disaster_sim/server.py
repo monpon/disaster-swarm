@@ -14,22 +14,27 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from .config import SimConfig
-from .protocol import snapshot_message, state_message, world_message
+from .protocol import MapStream, feed_message, state_message, world_message
 from .sim import Simulation
 
 LOOP_HZ = 60
 BROADCAST_HZ = 20
-SEEN_EVERY = 10  # send the last-seen grid every Nth broadcast (2 Hz)
+SEEN_EVERY = 10  # proper-scan time deltas every Nth broadcast (2 Hz)
+FEED_HZ = 4
 MAX_COMPUTE_PER_TICK = 0.012  # seconds of CPU per loop tick, keeps the socket responsive
+
+
+def dumps(payload: dict) -> str:
+    return json.dumps(payload, separators=(",", ":"))
 
 
 class SimServer:
     def __init__(self):
         self.sim = Simulation(SimConfig())
+        self.stream = MapStream(self.sim)
         self.running = True
         self.speed = 1.0
-        self.clients: set[WebSocket] = set()
-        self.map_tick = -1
+        self.clients: dict[WebSocket, int | None] = {}  # socket -> selected drone (camera feed)
         self.event_idx = 0
         self.rtf = 0.0  # achieved real-time factor
         self.dirty_world = False
@@ -38,7 +43,10 @@ class SimServer:
     def extra(self) -> dict:
         return {"running": self.running, "speed": self.speed, "rtf": round(self.rtf, 2)}
 
-    def handle(self, msg: dict) -> None:
+    def handle(self, ws: WebSocket, msg: dict) -> None:
+        if msg.get("type") == "select":
+            self.clients[ws] = msg.get("drone")
+            return
         cmd = msg.get("cmd")
         if cmd == "play":
             self.running = True
@@ -53,34 +61,32 @@ class SimServer:
         elif cmd == "reset":
             cfg = self.sim.cfg.updated(**msg.get("config", {}))
             self.sim.reset(cfg)
-            self.map_tick = -1
+            self.stream = MapStream(self.sim)
             self.event_idx = 0
             self.dirty_world = True
 
-    async def send(self, ws: WebSocket, payload: dict) -> bool:
+    def snapshot(self) -> dict:
+        return state_message(self.sim, self.stream, 0, self.extra(), True, full=True)
+
+    async def send(self, ws: WebSocket, text: str) -> bool:
         try:
-            await ws.send_text(json.dumps(payload, separators=(",", ":")))
+            await ws.send_text(text)
             return True
         except Exception:
+            self.clients.pop(ws, None)
             return False
 
     async def broadcast(self, payload: dict) -> None:
         if not self.clients:
             return
-        text = json.dumps(payload, separators=(",", ":"))
-        dead = []
+        text = dumps(payload)
         for ws in list(self.clients):
-            try:
-                await ws.send_text(text)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.clients.discard(ws)
+            await self.send(ws, text)
 
     async def run(self) -> None:
         sim_debt = 0.0
         last = time.perf_counter()
-        last_broadcast = 0.0
+        last_broadcast = last_feed = 0.0
         rtf_window: list[tuple[float, float]] = []
         while True:
             now = time.perf_counter()
@@ -101,17 +107,22 @@ class SimServer:
             if self.dirty_world:
                 self.dirty_world = False
                 await self.broadcast(world_message(self.sim))
-                await self.broadcast(snapshot_message(self.sim, self.extra()))
-                self.map_tick = self.sim.master.tick
+                await self.broadcast(self.snapshot())
+                self.stream.deltas()  # advance the shared cursor past the snapshot
+                self.stream.seen()
                 self.event_idx = len(self.sim.master.events)
-            elif now - last_broadcast >= 1.0 / BROADCAST_HZ:
+            elif self.clients and now - last_broadcast >= 1.0 / BROADCAST_HZ:
                 last_broadcast = now
                 self.broadcasts += 1
-                msg = state_message(self.sim, self.map_tick, self.event_idx, self.extra(),
-                                    include_seen=self.broadcasts % SEEN_EVERY == 0)
-                self.map_tick = self.sim.master.tick
+                msg = state_message(self.sim, self.stream, self.event_idx, self.extra(),
+                                    with_seen=self.broadcasts % SEEN_EVERY == 0)
                 self.event_idx = len(self.sim.master.events)
                 await self.broadcast(msg)
+            if self.clients and now - last_feed >= 1.0 / FEED_HZ:
+                last_feed = now
+                for ws, drone in list(self.clients.items()):
+                    if drone is not None:
+                        await self.send(ws, dumps(feed_message(self.sim, int(drone))))
             await asyncio.sleep(max(0.0, 1.0 / LOOP_HZ - (time.perf_counter() - now)))
 
 
@@ -131,19 +142,19 @@ app = FastAPI(lifespan=lifespan)
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-    await server.send(ws, world_message(server.sim))
-    # The snapshot carries the full map; later diffs come from the shared broadcast.
-    await server.send(ws, snapshot_message(server.sim, server.extra()))
-    server.clients.add(ws)
+    await ws.send_text(dumps(world_message(server.sim)))
+    # The snapshot carries the full map; later deltas come from the shared broadcast.
+    await ws.send_text(dumps(server.snapshot()))
+    server.clients[ws] = None
     try:
         while True:
             msg = json.loads(await ws.receive_text())
-            if msg.get("type") == "control":
-                server.handle(msg)
+            if msg.get("type") in ("control", "select"):
+                server.handle(ws, msg)
     except (WebSocketDisconnect, json.JSONDecodeError, RuntimeError):
         pass
     finally:
-        server.clients.discard(ws)
+        server.clients.pop(ws, None)
 
 
 _dist = Path(__file__).resolve().parents[2] / "ui" / "dist"

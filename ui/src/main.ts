@@ -2,66 +2,82 @@ import "./style.css";
 import * as THREE from "three";
 import { SimSocket } from "./net";
 import { createStage, type Stage } from "./scene/setup";
-import { WorldView } from "./scene/world";
-import { FogLayer } from "./scene/fog";
-import { SwarmView } from "./scene/drones";
+import { RealView } from "./scene/realview";
 import { MapView } from "./scene/mapview";
-import { Freshness } from "./scene/freshness";
+import { SwarmView } from "./scene/drones";
+import { CommsLayer } from "./scene/comms";
 import { CameraRig } from "./ui/camera";
-import { ControlPanel, type ViewSettings } from "./ui/controls";
+import { ControlPanel, type ViewMode, type ViewSettings } from "./ui/controls";
 import { Telemetry } from "./ui/telemetry";
 import { MissionChart } from "./ui/charts";
+import { FeedPanel } from "./ui/feed";
 import {
   cameraModel,
+  type BuildingInfo,
   type Candidate,
   type DroneState,
+  type MapEntry,
   type ServerMessage,
   type SimConfig,
   type SnapshotMessage,
   type StateMessage,
 } from "./types";
 
-// Left: the real world with the drones flying. Right: the master's fused map, built live.
-const flight = createStage(document.getElementById("view-flight")!);
+// Left: the real building with the drones flying. Right: the master's reconstruction.
+const viewsEl = document.getElementById("views")!;
+const real = createStage(document.getElementById("view-real")!);
 const map = createStage(document.getElementById("view-map")!, "#06080d");
+for (const st of [real, map]) st.renderer.localClippingEnabled = true;
 map.renderer.shadowMap.enabled = false;
 
-const worldView = new WorldView();
-const swarm = new SwarmView();
-flight.scene.add(worldView.group, swarm.group);
+const realView = new RealView();
 const mapView = new MapView();
-map.scene.add(mapView.group);
+const swarmReal = new SwarmView();
+const swarmMap = new SwarmView();
+const commsReal = new CommsLayer();
+const commsMap = new CommsLayer();
+real.scene.add(realView.group, swarmReal.group, commsReal.group);
+map.scene.add(mapView.group, swarmMap.group, commsMap.group);
 
-let fog: FogLayer | null = null;
-const fresh = new Freshness();
-let lastPaint = 0;
+let building: BuildingInfo | null = null;
 let config: SimConfig | null = null;
-let candidates: Candidate[] = [];
-let found: number[] = [];
 let drones: DroneState[] = [];
-let frontiers: [number, number, number][] = [];
+let candidates: Candidate[] = [];
+let entries: MapEntry[] = [];
+let targets: [number, number, number, number][] = [];
+let mesh: [number, number, number][] = [];
+let found: number[] = [];
+let cut = Infinity;
+let lastRecolor = 0;
+let worldToken = 0;
+const pending: (StateMessage | SnapshotMessage)[] = [];
 
 const telemetry = new Telemetry((id) => rig.follow(id));
 const chart = new MissionChart(document.getElementById("chart")!);
+const feed = new FeedPanel();
 const net = new SimSocket(onMessage, (ok) => telemetry.connection(ok));
+net.onOpen = () => net.select(swarmReal.selected);
 const panel = new ControlPanel(net, {
   onView: applyView,
   onOverview: () => {
-    active = flight;
+    active = real;
     rig.overview();
   },
 });
-const rig = new CameraRig(flight, swarm, (id) => {
-  active = flight;
+const rig = new CameraRig(real, [swarmReal, swarmMap], (id) => {
+  active = real;
   telemetry.renderCard(id);
-});
+  feed.select(id);
+  net.select(id);
+}, [map]);
+feed.select(null);
 
 // Camera sync: whichever view the user last touched drives the other.
-let active: Stage = flight;
-flight.controls.addEventListener("start", () => (active = flight));
+let active: Stage = real;
+real.controls.addEventListener("start", () => (active = real));
 map.controls.addEventListener("start", () => {
   active = map;
-  if (panel.view.syncCameras) rig.unfollow();
+  rig.unfollow();
 });
 
 function syncCamera(src: Stage, dst: Stage): void {
@@ -70,110 +86,186 @@ function syncCamera(src: Stage, dst: Stage): void {
   dst.camera.quaternion.copy(src.camera.quaternion);
 }
 
+function cutHeight(v: ViewSettings): number {
+  if (!building) return Infinity;
+  if (v.floor === "all") return Infinity;
+  if (v.floor === "roof off") return building.bbox[4];
+  return Number(v.floor.slice(1)) * building.story;
+}
+
 function applyView(v: ViewSettings): void {
-  swarm.setScale(v.droneScale);
-  if (fog) {
-    fog.fog = v.fog;
-    fog.freshness = v.freshFlight;
-    fog.paint(fresh, v.staleAfter);
+  viewsEl.className = `mode-${v.view}`;
+  document.querySelectorAll<HTMLButtonElement>("#view-switch button").forEach((b) =>
+    b.classList.toggle("on", b.dataset.view === v.view),
+  );
+  cut = cutHeight(v);
+  const planes = Number.isFinite(cut) ? [new THREE.Plane(new THREE.Vector3(0, 0, -1), cut)] : [];
+  realView.layer?.setClip(planes);
+  mapView.setClip(planes);
+  mapView.setPointSize(v.pointSize);
+  document.getElementById("cut-label")!.textContent = v.floor === "all" ? "" : `cutaway: ${v.floor}`;
+  for (const s of [swarmReal, swarmMap]) s.setScale(v.droneScale);
+  for (const c of [commsReal, commsMap]) {
+    c.routes.visible = v.links;
+    c.mesh.visible = v.mesh;
   }
-  mapView.paintFreshness(fresh, v.staleAfter, v.freshMap);
-  document.getElementById("legend-fresh")!.style.display = v.freshMap ? "" : "none";
-  document.getElementById("legend-fresh-max")!.textContent = `${v.staleAfter}s`;
-  worldView.setVisibility(v.truth, v.fog, fog);
-  Object.assign(mapView.layers, { frontiers: v.frontiers, frustums: v.footprints, paths: v.paths, labels: v.labels });
+  Object.assign(mapView.layers, { shell: v.shell, targets: v.targets, entries: v.entries });
+  mapView.staleAfter = v.staleAfter;
+  if (mapView.mode !== v.mapColor) {
+    mapView.mode = v.mapColor;
+    mapView.recolor();
+  }
+  document.querySelectorAll<HTMLElement>(".legend [data-mode]").forEach((el) => {
+    el.style.display = el.dataset.mode === v.mapColor ? "" : "none";
+  });
+  document.getElementById("legend-stale")!.textContent = `${v.staleAfter}s`;
 }
 
 function applyState(msg: StateMessage | SnapshotMessage): void {
-  swarm.sync(msg.drones);
-  if (fog && fog.apply(msg.map)) worldView.reveal(fog);
-  mapView.applyCells(msg.map);
-  if (msg.seen) fresh.setSeen(msg.seen);
-  fresh.setClock(msg.metrics.t, msg.metrics.running, msg.metrics.rtf);
+  swarmReal.sync(msg.drones);
+  swarmMap.sync(msg.drones);
+  mapView.setClock(msg.metrics.t, msg.metrics.running, msg.metrics.rtf);
+  mapView.applyDeltas(msg.map);
+  if (msg.seen) mapView.applySeen(msg.seen);
   drones = msg.drones;
   candidates = msg.candidates;
+  entries = msg.entries;
+  targets = msg.targets;
+  mesh = msg.mesh ?? [];
   found = msg.found;
-  frontiers = msg.frontiers;
+  mapView.setEntries(entries);
   telemetry.metrics(msg.metrics);
-  telemetry.drones(msg.drones, swarm.selected);
+  telemetry.drones(msg.drones, swarmReal.selected);
   telemetry.addEvents(msg.events);
+  const frontier = targets.filter((t) => t[3] === 0).length;
   document.getElementById("map-stats")!.textContent =
-    `${mapView.knownCells.toLocaleString()} cells mapped · ${mapView.obstacleCells.toLocaleString()} obstacle · ` +
-    `${frontiers.length} frontiers · ${candidates.filter((c) => c.confirmed).length} survivors`;
+    `${msg.map.ptotal.toLocaleString()} points · ${entries.length} entries · ` +
+    `${frontier} frontier / ${targets.length - frontier} surface targets · ${candidates.filter((c) => c.confirmed).length} survivors`;
 }
 
+async function onWorld(b: BuildingInfo, cfg: SimConfig): Promise<void> {
+  const token = ++worldToken;
+  building = b;
+  config = cfg;
+  const cam = cameraModel(cfg);
+  for (const s of [swarmReal, swarmMap]) {
+    s.clear();
+    s.camera = cam;
+  }
+  mapView.build(b, cfg);
+  await realView.build(b);
+  if (token !== worldToken) return;
+  const [x0, y0, x1, y1] = b.bbox;
+  rig.overviewTarget.set((x0 + x1) / 2, (y0 + y1) / 2, 2);
+  rig.overviewPos.set(x0 - 45, y0 - 60, 85);
+  panel.setFloors(b.floors);
+  rig.unfollow();
+  feed.select(null);
+  telemetry.clearEvents();
+  applyView(panel.view);
+  // States that arrived while the building was decompressing.
+  for (const m of pending.splice(0)) handleState(m);
+}
+
+function handleState(msg: StateMessage | SnapshotMessage): void {
+  if (msg.type === "snapshot") {
+    chart.reset(msg.history);
+    applyState(msg);
+    panel.syncFromServer(config, msg.metrics.running, msg.metrics.speed);
+  } else {
+    applyState(msg);
+    chart.push(msg.history);
+  }
+}
+
+let firstWorld = true;
 function onMessage(msg: ServerMessage): void {
   switch (msg.type) {
-    case "world": {
-      config = msg.config;
-      const cam = cameraModel(config);
-      swarm.clear();
-      swarm.camera = cam;
-      worldView.build(msg.world, msg.pads);
-      mapView.build(msg.world, msg.pads, cam);
-      if (fog) {
-        flight.scene.remove(fog.mesh);
-        fog.dispose();
-      }
-      fog = new FogLayer(msg.world);
-      fresh.reset();
-      flight.scene.add(fog.mesh);
-      rig.unfollow();
-      telemetry.clearEvents();
-      applyView(panel.view);
+    case "world":
+      pending.length = 0;
+      void onWorld(msg.building, msg.config).then(() => {
+        if (firstWorld) {
+          firstWorld = false;
+          rig.overview(true);
+          syncCamera(real, map);
+        }
+      });
       break;
-    }
     case "snapshot":
-      chart.reset(msg.history);
-      applyState(msg);
-      panel.syncFromServer(config, msg.metrics.running, msg.metrics.speed);
-      break;
     case "state":
-      applyState(msg);
-      chart.push(msg.history);
+      if (!realView.layer || pending.length) pending.push(msg);
+      else handleState(msg);
+      break;
+    case "feed":
+      if (msg.drone === swarmReal.selected) feed.show(msg);
       break;
   }
 }
 
+const VIEWS: ViewMode[] = ["split", "real", "map"];
+document.querySelectorAll<HTMLButtonElement>("#view-switch button").forEach((b) =>
+  b.addEventListener("click", () => {
+    panel.view.view = b.dataset.view as ViewMode;
+    panel.gui.controllersRecursive().forEach((c) => c.updateDisplay());
+    applyView(panel.view);
+  }),
+);
+
 window.addEventListener("keydown", (e) => {
-  if ((e.target as HTMLElement).tagName === "INPUT") return;
+  if ((e.target as HTMLElement).tagName === "INPUT" || (e.target as HTMLElement).tagName === "SELECT") return;
   if (e.code === "Space") {
     e.preventDefault();
     panel.togglePlay();
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    panel.cycle("view", VIEWS);
+  } else if (e.key === "f" || e.key === "F") {
+    const floors = building ? Array.from({ length: building.floors }, (_, i) => `F${i + 1}`) : [];
+    panel.cycle("floor", ["all", "roof off", ...floors.reverse()]);
+  } else if (e.key === "c" || e.key === "C") {
+    panel.cycle("mapColor", ["texture", "quality", "freshness"]);
   } else if (e.key === "Escape") {
     rig.unfollow();
   } else if (e.key === "o" || e.key === "O") {
-    active = flight;
+    active = real;
     rig.overview();
   } else if (/^[0-9]$/.test(e.key)) {
     const id = Number(e.key);
-    if (swarm.get(id)) rig.follow(id);
+    if (swarmReal.get(id)) rig.follow(id);
   }
 });
+
+const visible = (st: Stage) => st.renderer.domElement.parentElement!.clientWidth > 0;
 
 const clock = new THREE.Clock();
 function frame(): void {
   const dt = Math.min(clock.getDelta(), 0.1);
   const t = clock.elapsedTime;
-  if (panel.view.syncCameras && active === map) {
+  if (active === map && rig.following === null) {
     map.controls.update();
-    syncCamera(map, flight);
+    syncCamera(map, real);
   } else {
     rig.update();
-    if (panel.view.syncCameras) syncCamera(flight, map);
-    else map.controls.update();
+    syncCamera(real, map);
   }
-  swarm.update(dt, worldView.antenna, panel.view);
-  worldView.updateMarkers(candidates, found, t);
-  mapView.update(drones, swarm, frontiers, candidates, t);
-  // Freshness colors age continuously; repaint the grids a few times a second.
-  if (performance.now() - lastPaint > 200) {
-    lastPaint = performance.now();
-    const v = panel.view;
-    mapView.paintFreshness(fresh, v.staleAfter, v.freshMap);
-    if (fog && (v.freshFlight || v.fog)) fog.paint(fresh, v.staleAfter);
+  const v = panel.view;
+  swarmReal.update(dt, v);
+  swarmMap.update(dt, v);
+  if (building) {
+    commsReal.update(drones, mesh, swarmReal.positions(), building.base, swarmReal.selected);
+    commsMap.update(drones, mesh, swarmMap.positions(), building.base, swarmMap.selected);
   }
-  for (const st of [flight, map]) {
+  realView.updateMarkers(found, t, cut, v.survivorsTruth);
+  mapView.setTargets(targets, cut);
+  mapView.setCandidates(candidates, t, cut);
+  mapView.update();
+  // Freshness colors age continuously; repaint a few times a second.
+  if (v.mapColor === "freshness" && performance.now() - lastRecolor > 500) {
+    lastRecolor = performance.now();
+    mapView.recolor();
+  }
+  for (const st of [real, map]) {
+    if (!visible(st)) continue;
     st.renderer.render(st.scene, st.camera);
     st.labels.render(st.scene, st.camera);
   }

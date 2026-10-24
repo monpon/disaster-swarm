@@ -8,20 +8,23 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   </head>
   <body>
-    <main id="views">
-      <section id="view-flight" class="view">
-        <div class="view-tag"><b>LIVE FLIGHT</b><span>real world · forward cameras</span></div>
+    <main id="views" class="mode-split">
+      <section id="view-real" class="view">
+        <div class="view-tag"><b>REAL BUILDING</b><span>ground truth · drones in flight</span></div>
       </section>
       <section id="view-map" class="view">
-        <div class="view-tag map"><b>MASTER MAP</b><span id="map-stats">fused from drone uplinks</span></div>
+        <div class="view-tag map"><b>MASTER MAP</b><span id="map-stats">point cloud from camera feeds</span></div>
         <div class="legend">
-          <span id="legend-fresh"><i class="grad fresh"></i>last seen: now → <b id="legend-fresh-max">120s</b></span>
-          <span><i style="background:#262f42"></i>free</span>
-          <span><i class="grad"></i>obstacle height 0 → 42 m</span>
+          <span data-mode="texture"><i class="grad tex"></i>points back-projected from depth pixels, in the color the camera saw</span>
+          <span data-mode="quality"><i class="grad qual"></i>scan quality: far → proper (≤ 8 m) → close</span>
+          <span data-mode="freshness"><i class="grad fresh"></i>last proper scan: now → <b id="legend-stale">120s</b> <i style="background:#3a4152"></i>never</span>
           <span><i style="background:#ffb020;border-radius:50%"></i>frontier</span>
+          <span><i style="background:#5ec8ff;border-radius:50%"></i>unscanned surface</span>
+          <span><i style="background:#f6e05e"></i>entry</span>
           <span><i style="background:#3ddc97;border-radius:50%"></i>survivor</span>
         </div>
       </section>
+      <div id="cut-label"></div>
     </main>
 
     <header id="hud">
@@ -29,18 +32,23 @@
         <span id="conn" class="conn down"></span>
         <div>
           <h1>DISASTER SWARM</h1>
-          <p>Search &amp; rescue · central master control</p>
+          <p>Indoor search &amp; rescue · central master</p>
         </div>
         <span id="status-mission" class="paused">CONNECTING</span>
       </div>
+      <div id="view-switch">
+        <button data-view="real">Real</button><button data-view="split" class="on">Split</button><button data-view="map">Map</button>
+      </div>
       <div class="metrics">
         <div class="metric"><label>Mission</label><span id="m-time">00:00</span></div>
-        <div class="metric"><label>Coverage</label><span id="m-cov">0%</span></div>
+        <div class="metric wide"><label>Phase</label><span id="m-phase">-</span></div>
+        <div class="metric"><label>Entries</label><span id="m-entries">0</span></div>
+        <div class="metric"><label>Explored</label><span id="m-explored">0%</span></div>
+        <div class="metric"><label>Scanned</label><span id="m-scanned">0%</span></div>
         <div class="metric accent"><label>Survivors</label><span id="m-found">0/0</span></div>
         <div class="metric"><label>Airborne</label><span id="m-air">0</span></div>
+        <div class="metric"><label>Relays</label><span id="m-relays">0</span></div>
         <div class="metric"><label>Lost</label><span id="m-lost">0</span></div>
-        <div class="metric"><label>Wind</label><span id="m-wind">-</span></div>
-        <div class="metric wide"><label>Freshness</label><span id="m-fresh">-</span></div>
         <div class="metric wide"><label>Uplink</label><span id="m-link">-</span></div>
         <div class="metric wide"><label>Sim rate</label><span id="m-rtf">-</span></div>
       </div>
@@ -50,7 +58,7 @@
       <section class="panel">
         <h2>Fleet</h2>
         <table id="fleet">
-          <thead><tr><th>ID</th><th>Mode</th><th>Battery</th><th class="num">Alt</th><th class="num">m/s</th></tr></thead>
+          <thead><tr><th>ID</th><th>Mode</th><th>Battery</th><th class="num">Mbps</th><th class="num">Queue</th></tr></thead>
           <tbody id="fleet-body"></tbody>
         </table>
       </section>
@@ -62,6 +70,11 @@
 
     <aside id="right" class="panel-stack">
       <section class="panel"><div id="drone-card" class="empty"></div></section>
+      <section id="feed-panel" class="panel empty">
+        <h2 id="feed-title">Camera feed</h2>
+        <div class="feed-row"><canvas id="feed-rgb"></canvas><canvas id="feed-depth"></canvas></div>
+        <div id="feed-info">select a drone</div>
+      </section>
       <section class="panel grow">
         <h2>Master event log</h2>
         <ul id="events"></ul>

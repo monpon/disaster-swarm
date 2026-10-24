@@ -6,6 +6,7 @@ type StatusHandler = (connected: boolean) => void;
 export class SimSocket {
   private ws: WebSocket | null = null;
   private retry = 500;
+  onOpen: (() => void) | null = null;
 
   constructor(
     private readonly onMessage: Handler,
@@ -21,6 +22,7 @@ export class SimSocket {
     ws.onopen = () => {
       this.retry = 500;
       this.onStatus(true);
+      this.onOpen?.();
     };
     ws.onmessage = (ev) => this.onMessage(JSON.parse(ev.data) as ServerMessage);
     ws.onclose = () => {
@@ -28,6 +30,10 @@ export class SimSocket {
       setTimeout(() => this.connect(), this.retry);
       this.retry = Math.min(this.retry * 2, 5000);
     };
+  }
+
+  select(drone: number | null): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "select", drone }));
   }
 
   control(cmd: string, extra: Record<string, unknown> = {}): void {

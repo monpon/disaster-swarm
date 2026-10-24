@@ -1,20 +1,22 @@
-"""Simulation: drones (physics + onboard autopilot + sensors) talking to the central master."""
+"""Simulation: drones (physics, autopilot, camera) <-> radio <-> central master."""
 from __future__ import annotations
+
+from collections import deque
 
 import numpy as np
 
+from . import materials as M
 from .autopilot import Autopilot
-from .comms import Link
+from .building import generate_building
+from .camera import RGBDCamera
 from .config import SimConfig
 from .control import FlightController
-from .mapping import OBSTACLE, FacadeMap, OccupancyGrid, ScanModel
 from .master import MasterController
 from .physics import F_MAX, QuadrotorFleet
-from .sensors import Camera
-from .world import generate_world
+from .radio import Radio
 
 GUST_TAU = 4.0
-SHARED_STAMP = -2  # stamp for cells received from the master, so they are never echoed back
+FRAME_BUFFER = 160  # frames a drone can hold onboard while its link is down (~40 s)
 
 
 class Simulation:
@@ -26,34 +28,21 @@ class Simulation:
             self.cfg = cfg
         cfg = self.cfg
         self.rng = np.random.default_rng(cfg.seed + 1000)
-        self.world = generate_world(cfg)
+        self.b = generate_building(cfg)
         n = cfg.n_drones
-        self.pads = self.world.pad_positions(n)
-        start = np.column_stack([self.pads, self.world.height_at(self.pads[:, 0], self.pads[:, 1])])
-        self.fleet = QuadrotorFleet(n, start, yaw=np.full(n, np.pi / 4), battery_wh=cfg.battery_wh)
+        self.pads = self.b.pads
+        start = np.column_stack([self.pads, np.ones(n)])
+        self.fleet = QuadrotorFleet(n, start, yaw=np.zeros(n), battery_wh=cfg.battery_wh)
         self.fc = FlightController(n, max_speed=cfg.max_speed)
         self.fc.pos_sp[:] = start
-        self.fc.yaw_sp[:] = np.pi / 4
-        self.local_maps = [OccupancyGrid(self.world.n) for _ in range(n)]
-        self.local_facades = [FacadeMap(len(self.world.facades)) for _ in range(n)]
-        pitch = np.deg2rad(cfg.cam_pitch_deg)
-        self.autopilots = [Autopilot(i, self.local_maps[i], self.world.cell_of, pitch, cfg.max_speed)
-                           for i in range(n)]
-        self.camera = Camera(self.world, self.rng, cfg)
-        self.scan_model = ScanModel(cfg.scan_near, cfg.cam_range, cfg.proper_scan_range)
-        # What each camera is looking at right now: per cell, the closest viewer (id + 1, 0 = none)
-        # and that view's scan quality (0-255). Streamed to the viewer for FOV footprints.
-        self.view_owner = np.zeros(self.world.n ** 2, dtype=np.uint8)
-        self.view_quality = np.zeros(self.world.n ** 2, dtype=np.uint8)
-        self.patch_owner = np.zeros(len(self.world.facades), dtype=np.uint8)
-        self.patch_view_q = np.zeros(len(self.world.facades), dtype=np.uint8)
-        self.master = MasterController(cfg, self.pads, self.world)
-        self.uplinks = [Link(cfg.link_latency, cfg.link_dropout, self.rng) for _ in range(n)]
-        self.downlinks = [Link(cfg.link_latency, cfg.link_dropout, self.rng) for _ in range(n)]
-        self.pending_detections: list[list[tuple]] = [[] for _ in range(n)]
-        self.shared_tick = -1
-        self.cam_on = np.zeros(n, dtype=bool)
-        self.agl = np.zeros(n)
+        self.autopilots = [Autopilot(i, cfg.max_speed) for i in range(n)]
+        self.camera = RGBDCamera(self.b, cfg, self.rng)
+        self.radio = Radio(self.b, cfg, self.rng)
+        self.master = MasterController(cfg, self.b.vox.shape, (self.b.x0, self.b.y0, self.b.x1, self.b.y1, self.b.top),
+                                       self.pads, self.b.base)
+        self.rangers = np.full((n, 6), 2.5)
+        self.last_frames: list = [None] * n  # most recent frame the master received per drone
+        self.backlog = [deque() for _ in range(n)]  # frames waiting for radio capacity
 
         self.dt = 1.0 / cfg.physics_hz
         self.t = 0.0
@@ -61,177 +50,143 @@ class Simulation:
         self.gust = np.zeros(3)
         ang = np.deg2rad(cfg.wind_dir_deg)
         self.wind_mean = cfg.wind_speed * np.array([np.cos(ang), np.sin(ang), 0.0])
-        self.wind = self.wind_mean.copy()
-        self.history: list[tuple[float, float, int]] = []  # (t, coverage, confirmed)
+        self.history: list[tuple] = []  # (t, explored, scanned, survivors)
+        self._truth_cache = None
 
-    def _every(self, hz: int) -> bool:
+    def _every(self, hz: float) -> bool:
         return self.tick % max(1, round(self.cfg.physics_hz / hz)) == 0
 
     def step(self) -> None:
-        cfg, dt = self.cfg, self.dt
-
-        # Wind gusts: Ornstein-Uhlenbeck process.
-        sigma = cfg.gust_strength
-        self.gust += (-self.gust / GUST_TAU) * dt + sigma * np.sqrt(2 * dt / GUST_TAU) * self.rng.normal(size=3) * np.array([1, 1, 0.3])
-        self.wind = self.wind_mean + self.gust
+        cfg, dt, f = self.cfg, self.dt, self.fleet
+        self.gust += (-self.gust / GUST_TAU) * dt + cfg.gust_strength * np.sqrt(2 * dt / GUST_TAU) \
+            * self.rng.normal(size=3) * np.array([1, 1, 0.3])
+        wind = np.where(self.b.inside_building(f.pos)[:, None], 0.0, (self.wind_mean + self.gust)[None, :])
 
         if self._every(cfg.master_hz):
-            for cmd_drone, cmd in self.master.step(self.t):
-                self.downlinks[cmd_drone].send(self.t, cmd)
-            self._share_map()
-        for i, link in enumerate(self.downlinks):
-            for msg in link.receive(self.t):
-                if isinstance(msg, dict):  # merged-map update from the master
-                    self.local_maps[i].apply_cells(*msg["cells"], tick=SHARED_STAMP)
-                else:
-                    self.autopilots[i].on_command(msg)
+            self.radio.update(f.pos, ~f.crashed)
+            for i, ap in enumerate(self.autopilots):
+                ap.set_link(self.radio.routes[i].connected, self.t)
+            for drone, cmd in self.master.step(self.t):
+                self.radio.send_down(self.t, drone, cmd)
+        self.radio.tick(dt)
+
+        for direction, drone, msg in self.radio.receive(self.t):
+            if direction == "down":
+                self.autopilots[drone].on_command(msg)
+            elif isinstance(msg, dict):
+                self.master.on_telemetry(msg, self.t)
+            else:
+                self.master.on_frame(msg, self.t)
+                self.last_frames[drone] = msg
 
         if self._every(cfg.autopilot_hz):
+            self.rangers = self.camera.rangers(f.pos)
             for ap in self.autopilots:
-                ap.update(self.fleet, self.fc, 1.0 / cfg.autopilot_hz)
+                ap.update(f, self.fc, self.rangers[ap.i], self.t)
             self._charge(1.0 / cfg.autopilot_hz)
 
-        if self._every(cfg.sensor_hz):
-            self._sense()
+        if self._every(cfg.camera_hz):
+            for i in range(f.n):
+                if f.crashed[i] or f.grounded[i]:
+                    continue
+                q = self.backlog[i]
+                q.append(self.camera.capture(i, self.t, f.pos[i], f.rot[i]))
+                if len(q) > FRAME_BUFFER:
+                    q.popleft()  # onboard buffer full: oldest frame is lost
+                    self.radio.frame_stats[i, 1] += 1
+            for i, q in enumerate(self.backlog):  # send buffered frames, oldest first
+                while q and self.radio.send_frame(self.t, i, q[0], q[0].nbytes):
+                    q.popleft()
 
-        if self._every(cfg.uplink_hz):
-            self._uplink()
-        for link in self.uplinks:
-            for pkt in link.receive(self.t):
-                self.master.ingest(pkt, self.t)
+        if self._every(cfg.telemetry_hz):
+            for i in range(f.n):
+                r = self.radio.routes[i]
+                self.radio.send_up(self.t, i, {
+                    "drone": i, "t": self.t, "pos": f.pos[i].copy(), "vel": f.vel[i].copy(),
+                    "soc": float(f.soc[i]), "grounded": bool(f.grounded[i]), "crashed": bool(f.crashed[i]),
+                    "link_cap": r.capacity, "hops": r.hops})
 
-        self.fc.update(self.fleet, dt)
-        self.fleet.step(dt, self.wind, self.world)
-
+        self.fc.update(f, dt)
+        f.step(dt, wind, self.b)
         self.tick += 1
         self.t += dt
         if self._every(1):
-            self.history.append((round(self.t, 1), self.scanned_fraction(), self.confirmed_count()))
+            m = self.coverage()
+            self.history.append((round(self.t, 1), m["explored"], m["scanned"], self.confirmed_count()))
 
     def advance(self, seconds: float) -> None:
         for _ in range(int(round(seconds / self.dt))):
             self.step()
 
-    def _share_map(self) -> None:
-        """Broadcast obstacle cells the master learned since the last share to every drone."""
-        idx, s, h, sg, q = self.master.map.cells_since(self.shared_tick)
-        self.shared_tick = self.master.tick
-        keep = s == OBSTACLE
-        if not keep.any():
-            return
-        payload = {"cells": (idx[keep], s[keep], h[keep], sg[keep], q[keep])}
-        for link in self.downlinks:
-            link.send(self.t, payload, size=9 * int(keep.sum()))
-
-    def _sense(self) -> None:
-        f = self.fleet
-        active = ~f.crashed & ~f.grounded
-        yaw = np.arctan2(f.rot[:, 1, 0], f.rot[:, 0, 0])
-        pitch = np.array([ap.gimbal for ap in self.autopilots])
-        agl, cam_on, views, dets = self.camera.sense(f.pos, yaw, pitch, active)
-        self.cam_on = cam_on
-        self.agl = agl
-        for arr in (self.view_owner, self.view_quality, self.patch_owner, self.patch_view_q):
-            arr[:] = 0
-        sm = self.scan_model
-        for i, v in enumerate(views):
-            if v is None:
-                continue
-            self.local_maps[i].observe(v.cells, v.cell_dist, self.world.heightmap, self.tick, self.t, sm, self.rng)
-            self.local_facades[i].observe(v.patches, v.patch_dist, v.patch_facing, self.tick, self.t, sm, self.rng)
-            q = np.rint(sm.quality(v.cell_dist) * 255).astype(np.uint8)
-            closer = q >= self.view_quality[v.cells]
-            self.view_owner[v.cells[closer]] = i + 1
-            self.view_quality[v.cells[closer]] = q[closer]
-            q = np.rint(sm.quality(v.patch_dist) * (0.35 + 0.65 * v.patch_facing) * 255).astype(np.uint8)
-            closer = q >= self.patch_view_q[v.patches]
-            self.patch_owner[v.patches[closer]] = i + 1
-            self.patch_view_q[v.patches[closer]] = q[closer]
-        for d in dets:
-            self.pending_detections[d.drone].append((d.x, d.y, d.range))
-
-    def _uplink(self) -> None:
-        f = self.fleet
-        for i in range(f.n):
-            if f.crashed[i] and self.master.drones[i].crashed:
-                continue
-            acked = int(self.master.acked_tick[i])
-            cells = self.local_maps[i].cells_since(acked)
-            idx = cells[0]
-            seen_idx, seen_t = self.local_maps[i].seen_since(acked)
-            facade = self.local_facades[i].since(acked)
-            facade_seen = self.local_facades[i].seen_since(acked)
-            pkt = {
-                "drone": i, "t": self.t, "tick": self.tick,
-                "pos": f.pos[i].copy(), "vel": f.vel[i].copy(), "soc": float(f.soc[i]),
-                "grounded": bool(f.grounded[i]), "crashed": bool(f.crashed[i]),
-                "cells": cells, "seen": (seen_idx, seen_t),
-                "facade": facade, "facade_seen": facade_seen,
-                "detections": self.pending_detections[i],
-            }
-            self.pending_detections[i] = []
-            # Re-sightings are sent as a compact bitmap + timestamp, not per-cell records.
-            size = 64 + 13 * len(idx) + 10 * len(facade[0]) + 12 * len(pkt["detections"]) + (self.world.n ** 2) // 8 * bool(len(seen_idx))
-            self.uplinks[i].send(self.t, pkt, size=size)
-
     def _charge(self, dt: float) -> None:
         f = self.fleet
-        on_pad = f.grounded & ~f.crashed & (np.hypot(f.pos[:, 0] - self.pads[:, 0], f.pos[:, 1] - self.pads[:, 1]) < 2.0)
+        on_pad = f.grounded & ~f.crashed & (np.hypot(f.pos[:, 0] - self.pads[:, 0], f.pos[:, 1] - self.pads[:, 1]) < 1.5)
         rate = f.battery_cap_j / self.cfg.charge_time_s
         f.battery_j = np.where(on_pad, np.minimum(f.battery_j + rate * dt, f.battery_cap_j), f.battery_j)
 
     # ----------------------------------------------------------------- metrics
-    def scanned_fraction(self) -> float:
-        return self.master.map.scanned(self.scan_model.threshold)
+    def _truth(self):
+        """Ground-truth interior air and exposed interior surfaces (for scoring only)."""
+        if self._truth_cache is None:
+            from scipy import ndimage
+            v = self.b.vox
+            air = v == M.AIR
+            interior = self.master.interior
+            reach = ndimage.binary_dilation(air, ndimage.generate_binary_structure(3, 1))
+            surface = (v != M.AIR) & interior & reach
+            self._truth_cache = ((air & interior).reshape(-1), surface.reshape(-1))
+        return self._truth_cache
 
-    def walls_scanned(self) -> float:
-        return self.master.facades.scanned(self.scan_model.threshold)
+    def coverage(self) -> dict:
+        air, surf = self._truth()
+        m = self.master.map
+        explored = float((m.free & air).sum() / max(air.sum(), 1))
+        scanned = float(((m.quality >= m.q.threshold) & surf).sum() / max(surf.sum(), 1))
+        return {"explored": round(explored, 4), "scanned": round(scanned, 4)}
 
     def confirmed_count(self) -> int:
         return sum(c.confirmed for c in self.master.candidates)
 
     def found_survivor_ids(self) -> list[int]:
-        """Ground-truth survivors matched by a confirmed candidate (for display/scoring)."""
-        out = []
+        out = set()
         for c in self.master.candidates:
             if not c.confirmed:
                 continue
-            best = min(self.world.survivors, key=lambda s: np.hypot(s.x - c.x, s.y - c.y), default=None)
-            if best is not None and np.hypot(best.x - c.x, best.y - c.y) < 5.0:
-                out.append(best.id)
-        return sorted(set(out))
+            for s in self.b.survivors:
+                if np.linalg.norm(np.array([s.x + 0.5, s.y + 0.5, s.z + 0.5]) - c.pos) < 2.5:
+                    out.add(s.id)
+        return sorted(out)
 
     def metrics(self) -> dict:
         f = self.fleet
-        up = sum(l.bytes for l in self.uplinks)
-        sent = sum(l.sent for l in self.uplinks) + sum(l.sent for l in self.downlinks)
-        dropped = sum(l.dropped for l in self.uplinks) + sum(l.dropped for l in self.downlinks)
+        cov = self.coverage()
         return {
             "t": round(self.t, 2),
-            "coverage": round(self.scanned_fraction(), 4),
-            "seen_frac": round(self.master.map.coverage(), 4),
-            "walls": round(self.walls_scanned(), 4),
-            "scan_threshold": round(self.scan_model.threshold, 3),
+            "phase": self.master.phase,
+            **cov,
+            "entries": len(self.master.entries),
+            "entries_usable": sum(not e.blocked for e in self.master.entries),
             "found": len(self.found_survivor_ids()),
-            "survivors": len(self.world.survivors),
+            "survivors": len(self.b.survivors),
             "candidates": len(self.master.candidates),
             "airborne": int((~f.grounded & ~f.crashed).sum()),
             "crashed": int(f.crashed.sum()),
+            "relays": sum(r.mode == "relay" for r in self.master.drones),
             "avg_soc": round(float(f.soc.mean()), 3),
-            "uplink_kb": round(up / 1024, 1),
-            "packet_loss": round(dropped / max(sent, 1), 3),
-            "wind": [round(float(v), 2) for v in self.wind[:2]],
-            "mission_done": self.master.mission_done,
-            **self._freshness(),
+            "frames_ok": int(self.radio.frame_stats[:, 0].sum()),
+            "frames_dropped": int(self.radio.frame_stats[:, 1].sum()),
+            "radio_mb": round(self.radio.stats["bytes"] / 1e6, 2),
+            "mapped_voxels": int(self.master.map.occupied.sum()),
+            "wind": [round(float(v), 2) for v in (self.wind_mean + self.gust)[:2]],
         }
 
-    def _freshness(self, stale_after: float = 120.0) -> dict:
-        seen = self.master.map.seen
-        known = seen >= 0
-        if not known.any():
-            return {"mean_age": 0.0, "stale_frac": 0.0}
-        age = self.t - seen[known]
-        return {"mean_age": round(float(age.mean()), 1), "stale_frac": round(float((age > stale_after).mean()), 3)}
+    def radio_mesh(self) -> list[list]:
+        """Every usable peer-to-peer link: [node a, node b, Mbps] with node -1 = base station."""
+        f = self.fleet
+        up = np.r_[True, ~f.crashed & ~f.grounded]
+        cap = self.radio.link_cap
+        a, b = np.nonzero(np.triu(cap > 0, 1) & up[:, None] & up[None, :])
+        return [[int(i) - 1, int(j) - 1, round(float(cap[i, j]) / 1e6, 1)] for i, j in zip(a, b)]
 
     def drone_states(self) -> list[dict]:
         f = self.fleet
@@ -239,6 +194,7 @@ class Simulation:
         for i in range(f.n):
             r = self.master.drones[i]
             ap = self.autopilots[i]
+            route = self.radio.routes[i]
             out.append({
                 "id": i,
                 "p": [round(float(v), 3) for v in f.pos[i]],
@@ -248,17 +204,17 @@ class Simulation:
                 "power": round(float(f.power[i]), 1),
                 "throttle": round(float(f.motor[i].mean() / F_MAX), 3),
                 "mode": r.mode,
-                "avoiding": ap.avoiding,
-                "holding": r.holding,
                 "crashed": bool(f.crashed[i]),
                 "grounded": bool(f.grounded[i]),
-                "cam_on": bool(self.cam_on[i]),
-                "gimbal": round(float(np.rad2deg(ap.gimbal)), 1),
-                "scanning": ap.scanning,
-                "agl": round(float(self.agl[i]), 2),
-                "cruise_alt": r.cruise_alt,
-                "target": None if r.target is None else [round(v, 2) for v in r.target],
+                "avoiding": ap.avoiding,
+                "returning": ap.returning,
+                "frozen": ap.frozen,
+                "link": round(route.capacity / 1e6, 2),
+                "hops": route.hops,
+                "route": [int(v) for v in route.path],
+                "frames": [int(v) for v in self.radio.frame_stats[i]],
+                "backlog": len(self.backlog[i]),
                 "path": [[round(v, 2) for v in p] for p in ap.cmd.path[ap.wp:]] if ap.cmd.kind == "path" else [],
-                "link_age": round(self.t - r.last_seen, 2) if r.last_seen >= 0 else None,
+                "serves": None if r.serves is None else int(r.serves),
             })
         return out

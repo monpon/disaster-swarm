@@ -12,6 +12,16 @@ function battColor(soc: number): string {
   return soc > 0.5 ? "#3ddc97" : soc > 0.25 ? "#ffb020" : "#ff4d4f";
 }
 
+function linkColor(mbps: number): string {
+  return mbps >= 8 ? "#3ddc97" : mbps >= 2 ? "#e8d44d" : mbps > 0 ? "#ff8c42" : "#ff4d4f";
+}
+
+const PHASE_LABEL: Record<string, string> = {
+  survey: "1 · EXTERIOR SURVEY",
+  interior: "2 · INTERIOR SCAN",
+  complete: "3 · COMPLETE",
+};
+
 /** Header metrics, fleet table, selected-drone card and event log. */
 export class Telemetry {
   private fleetBody = $("fleet-body");
@@ -24,19 +34,21 @@ export class Telemetry {
 
   metrics(m: Metrics): void {
     $("m-time").textContent = fmtTime(m.t);
-    $("m-cov").textContent = `${(m.coverage * 100).toFixed(1)}%`;
+    $("m-phase").textContent = PHASE_LABEL[m.phase] ?? m.phase;
+    $("m-entries").textContent = `${m.entries_usable}/${m.entries}`;
+    $("m-explored").textContent = `${(m.explored * 100).toFixed(1)}%`;
+    $("m-scanned").textContent = `${(m.scanned * 100).toFixed(1)}%`;
     $("m-found").textContent = `${m.found}/${m.survivors}`;
     $("m-air").textContent = String(m.airborne);
+    $("m-relays").textContent = String(m.relays);
     $("m-lost").textContent = String(m.crashed);
     $("m-lost").parentElement!.classList.toggle("alert", m.crashed > 0);
-    const ws = Math.hypot(m.wind[0], m.wind[1]);
-    const wd = (Math.atan2(m.wind[1], m.wind[0]) * 180) / Math.PI;
-    $("m-wind").innerHTML = `${ws.toFixed(1)} m/s <span class="wind-arrow" style="transform:rotate(${-wd}deg)">→</span>`;
-    $("m-fresh").textContent = `avg ${m.mean_age.toFixed(0)}s · ${(m.stale_frac * 100).toFixed(0)}% >120s`;
-    $("m-link").textContent = `${m.uplink_kb.toFixed(0)} kB · ${(m.packet_loss * 100).toFixed(1)}% loss`;
+    const tot = m.frames_ok + m.frames_dropped;
+    $("m-link").textContent = `${m.radio_mb.toFixed(0)} MB · ${tot ? ((m.frames_dropped / tot) * 100).toFixed(1) : "0.0"}% lost`;
     $("m-rtf").textContent = m.running ? `${m.rtf.toFixed(1)}× (set ${m.speed}×)` : "paused";
-    $("status-mission").textContent = m.mission_done ? "MISSION COMPLETE" : m.running ? "LIVE" : "PAUSED";
-    $("status-mission").className = m.mission_done ? "done" : m.running ? "live" : "paused";
+    const done = m.phase === "complete";
+    $("status-mission").textContent = done ? "MISSION COMPLETE" : m.running ? "LIVE" : "PAUSED";
+    $("status-mission").className = done ? "done" : m.running ? "live" : "paused";
   }
 
   drones(list: DroneState[], selected: number | null): void {
@@ -46,7 +58,7 @@ export class Telemetry {
       if (!row) {
         row = document.createElement("tr");
         row.innerHTML = `<td class="id"></td><td class="mode"><span class="badge"></span></td>
-          <td class="batt"><div class="bar"><div></div></div></td><td class="alt num"></td><td class="spd num"></td>`;
+          <td class="batt"><div class="bar"><div></div></div></td><td class="lnk num"></td><td class="bk num"></td>`;
         row.addEventListener("click", () => this.onPick(d.id));
         this.fleetBody.appendChild(row);
         this.rows.set(d.id, row);
@@ -62,8 +74,10 @@ export class Telemetry {
       const bar = row.querySelector(".bar > div") as HTMLElement;
       bar.style.width = `${d.soc * 100}%`;
       bar.style.background = battColor(d.soc);
-      (row.querySelector(".alt") as HTMLElement).textContent = d.p[2].toFixed(0);
-      (row.querySelector(".spd") as HTMLElement).textContent = Math.hypot(...d.v).toFixed(1);
+      const lnk = row.querySelector(".lnk") as HTMLElement;
+      lnk.textContent = d.grounded ? "—" : d.link > 0 ? `${d.link.toFixed(1)}${d.hops > 1 ? `·${d.hops}h` : ""}` : "LOST";
+      lnk.style.color = d.grounded ? "" : linkColor(d.link);
+      (row.querySelector(".bk") as HTMLElement).textContent = d.backlog ? String(d.backlog) : "";
     }
     for (const [id, row] of this.rows) {
       if (!list.some((d) => d.id === id)) {
@@ -78,18 +92,25 @@ export class Telemetry {
     const d = this.lastDrones.find((x) => x.id === selected);
     if (!d) {
       this.card.classList.add("empty");
-      this.card.innerHTML = `<div class="hint">Click a drone (or a fleet row) to follow it.<br>
+      this.card.innerHTML = `<div class="hint">Click a drone (or a fleet row) to follow it and see its camera feed.<br>
+        <kbd>Tab</kbd> real/map/split · <kbd>F</kbd> floor cutaway · <kbd>C</kbd> map coloring<br>
         <kbd>Esc</kbd> stop following · <kbd>O</kbd> overview · <kbd>Space</kbd> play/pause</div>`;
       return;
     }
     this.card.classList.remove("empty");
     const color = MODE_COLORS[d.mode];
     const speed = Math.hypot(...d.v);
-    const flags = [d.avoiding ? "obstacle reflex" : "", d.holding ? "separation hold" : "", d.crashed ? "CRASHED" : ""]
+    const flags = [
+      d.avoiding ? "ToF reflex" : "",
+      d.frozen ? "link lost: frozen, awaiting relay" : "",
+      d.returning ? "low battery: retracing trail" : "",
+      d.serves !== null ? `relaying D${d.serves}` : "",
+      d.crashed ? "CRASHED" : "",
+    ]
       .filter(Boolean)
       .map((f) => `<span class="flag">${f}</span>`)
       .join("");
-    const link = d.link_age === null ? "—" : `${(d.link_age * 1000).toFixed(0)} ms`;
+    const route = d.route.length ? d.route.map((n) => (n < 0 ? "M" : `D${n}`)).join(" → ") : "no route";
     this.card.innerHTML = `
       <div class="card-head">
         <span class="dot big" style="background:${color}"></span>
@@ -99,15 +120,13 @@ export class Telemetry {
       <div class="flags">${flags}</div>
       <div class="batt-big"><div style="width:${d.soc * 100}%;background:${battColor(d.soc)}"></div><span>${(d.soc * 100).toFixed(0)}%</span></div>
       <dl>
-        <dt>Altitude</dt><dd>${d.p[2].toFixed(1)} m <small>(${d.agl.toFixed(1)} AGL)</small></dd>
-        <dt>Speed</dt><dd>${speed.toFixed(1)} m/s</dd>
-        <dt>Position</dt><dd>${d.p[0].toFixed(0)}, ${d.p[1].toFixed(0)}</dd>
-        <dt>Power</dt><dd>${d.power.toFixed(0)} W · ${(d.throttle * 100).toFixed(0)}% thr</dd>
-        <dt>Cruise layer</dt><dd>${d.cruise_alt.toFixed(0)} m</dd>
-        <dt>Target</dt><dd>${d.target ? `${d.target[0].toFixed(0)}, ${d.target[1].toFixed(0)}` : "—"}</dd>
+        <dt>Position</dt><dd>${d.p[0].toFixed(1)}, ${d.p[1].toFixed(1)}, ${d.p[2].toFixed(1)}</dd>
+        <dt>Speed</dt><dd>${speed.toFixed(1)} m/s · ${d.power.toFixed(0)} W</dd>
+        <dt>Camera</dt><dd>nose-fixed · ${((yawOf(d.q) * 180) / Math.PI).toFixed(0)}° hdg</dd>
+        <dt>Link</dt><dd style="color:${linkColor(d.link)}">${d.link > 0 ? `${d.link.toFixed(2)} Mbps` : "disconnected"}</dd>
+        <dt>Route</dt><dd>${route}</dd>
+        <dt>Frames</dt><dd>${d.frames[0]} sent · ${d.frames[1]} lost · ${d.backlog} queued</dd>
         <dt>Waypoints</dt><dd>${d.path.length}</dd>
-        <dt>Camera</dt><dd>${d.cam_on ? `forward · ${((yawOf(d.q) * 180) / Math.PI).toFixed(0)}° hdg` : "off"}</dd>
-        <dt>Last uplink</dt><dd>${link}</dd>
       </dl>`;
   }
 
@@ -118,7 +137,7 @@ export class Telemetry {
       li.innerHTML = `<time>${fmtTime(e.t)}</time>${e.text}`;
       this.events.prepend(li);
     }
-    while (this.events.children.length > 120) this.events.lastChild?.remove();
+    while (this.events.children.length > 150) this.events.lastChild?.remove();
   }
 
   clearEvents(): void {

@@ -1,393 +1,262 @@
 import * as THREE from "three";
 import { CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
-import { MODE_COLORS, type CameraModel, type Candidate, type DroneState, type MapCells, type WorldInfo } from "../types";
-import type { SwarmView } from "./drones";
-import { FrustumView } from "./frustum";
-import { freshnessColor, type Freshness } from "./freshness";
+import { decodeB64, type BuildingInfo, type Candidate, type MapDeltas, type MapEntry, type SeenDeltas, type SimConfig } from "../types";
+import { siteDressing } from "./realview";
+import { PointCloud } from "./pointcloud";
 
-const UNKNOWN = [9, 12, 19, 255];
-const FREE = [38, 48, 66, 255];
-const MAX_FRONTIERS = 512;
-const MAX_PATH_POINTS = 64;
+export type ColorMode = "texture" | "quality" | "freshness";
 
-// Height colormap for obstacle columns (meters -> color).
-const STOPS: [number, THREE.Color][] = [
-  [0, new THREE.Color("#2b7a78")],
-  [6, new THREE.Color("#3ddc97")],
-  [16, new THREE.Color("#e8d44d")],
-  [28, new THREE.Color("#ff8c42")],
-  [42, new THREE.Color("#ff4d6d")],
-];
+const SEEN_UNITS_PER_S = 2; // must match sim/disaster_sim/protocol.py
+const MAX_TARGETS = 600;
 
-function heightColor(h: number, out = new THREE.Color()): THREE.Color {
-  for (let i = 1; i < STOPS.length; i++) {
-    if (h <= STOPS[i][0]) {
-      const [h0, c0] = STOPS[i - 1];
-      const [h1, c1] = STOPS[i];
-      return out.copy(c0).lerp(c1, (h - h0) / (h1 - h0));
-    }
-  }
-  return out.copy(STOPS[STOPS.length - 1][1]);
+const FRESH = new THREE.Color("#3ddc97");
+const MID = new THREE.Color("#e8d44d");
+const STALE = new THREE.Color("#ff4d4f");
+const ANCIENT = new THREE.Color("#7a1a22");
+const NEVER = new THREE.Color("#3a4152");
+
+/** Green (just scanned) -> yellow -> red (stale) -> dark red (twice the stale time). */
+export function freshnessColor(age: number, staleAfter: number, out = new THREE.Color()): THREE.Color {
+  const k = Math.max(age, 0) / staleAfter;
+  if (k <= 0.5) return out.copy(FRESH).lerp(MID, k * 2);
+  if (k <= 1) return out.copy(MID).lerp(STALE, (k - 0.5) * 2);
+  return out.copy(STALE).lerp(ANCIENT, Math.min(k - 1, 1));
 }
 
-interface MapDrone {
-  marker: THREE.Group;
-  arrow: THREE.Mesh;
-  arrowMat: THREE.MeshBasicMaterial;
-  drop: THREE.Line;
-  frustum: FrustumView;
-  path: THREE.Line;
-  pathMat: THREE.LineDashedMaterial;
-  label: CSS2DObject;
-  labelEl: HTMLDivElement;
-  mode: string;
+function qualityColor(q: number, threshold: number, out: THREE.Color): THREE.Color {
+  if (q >= threshold) return out.copy(MID).lerp(FRESH, Math.min((q - threshold) / Math.max(1 - threshold, 1e-3) * 1.5, 1));
+  return out.copy(STALE).lerp(MID, q / threshold);
 }
 
-/** The master's view of the world: only what the drones have reported, built up live. */
+/** The master's reconstruction, built point by point from the depth pixels the drones sent
+ * back. Per-voxel scan quality and freshness (from the master's occupancy map) drive the
+ * alternative color modes. */
 export class MapView {
   readonly group = new THREE.Group();
-  private world!: WorldInfo;
-  private data!: Uint8Array<ArrayBuffer>;
-  private texture!: THREE.DataTexture;
-  private obstacles!: THREE.InstancedMesh;
-  private frontierMesh!: THREE.InstancedMesh;
-  private drones = new Map<number, MapDrone>();
-  private candidates = new Map<number, THREE.Group>();
-  private confirmed = new Map<number, THREE.Group>();
-  private camera: CameraModel = { pitch: 0.61, tanH: 1, tanV: 0.58, range: 60 };
-  private dummy = new THREE.Object3D();
-  private color = new THREE.Color();
-  private cellState!: Int8Array; // numpy C-order [ix, iy]
-  private cellHeight!: Float32Array;
-  private instCell!: Int32Array; // obstacle instance -> flat cell index
-  private painted = false;
-  knownCells = 0;
-  obstacleCells = 0;
-  layers = { frontiers: true, frustums: true, paths: true, labels: true };
+  cloud: PointCloud | null = null;
+  pointSize = 0.3;
+  private clip: THREE.Plane[] = [];
+  mode: ColorMode = "texture";
+  staleAfter = 120;
+  layers = { shell: true, targets: true, entries: true };
+  private rgb = new Uint16Array(0);
+  private q = new Uint8Array(0);
+  private seen = new Uint16Array(0);
+  private threshold = 0.74;
+  private shell = new THREE.Group();
+  private dressing: THREE.Group | null = null;
+  private targets: THREE.Points;
+  private entryGroup = new THREE.Group();
+  private entryKeys = "";
+  private candGroup = new THREE.Group();
+  private candMeshes = new Map<number, THREE.Mesh>();
+  private simNow = 0;
+  private wallAt = 0;
+  private rate = 0;
 
-  build(world: WorldInfo, pads: [number, number][], cam: CameraModel): void {
-    this.dispose();
-    this.world = world;
-    this.camera = cam;
-    const n = world.n;
-    this.knownCells = 0;
-    this.obstacleCells = 0;
-    this.cellState = new Int8Array(n * n);
-    this.cellHeight = new Float32Array(n * n);
-    this.instCell = new Int32Array(n * n);
-    this.painted = false;
-
-    this.data = new Uint8Array(n * n * 4);
-    for (let i = 0; i < n * n; i++) this.data.set(UNKNOWN, i * 4);
-    this.texture = new THREE.DataTexture(this.data, n, n, THREE.RGBAFormat);
-    this.texture.magFilter = THREE.NearestFilter;
-    this.texture.needsUpdate = true;
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(world.size, world.size),
-      new THREE.MeshBasicMaterial({ map: this.texture }),
+  constructor() {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_TARGETS * 3), 3));
+    geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(MAX_TARGETS * 3), 3));
+    this.targets = new THREE.Points(
+      geo,
+      new THREE.PointsMaterial({ size: 0.7, vertexColors: true, transparent: true, opacity: 0.85, depthWrite: false }),
     );
-    this.group.add(ground);
-
-    const grid = new THREE.GridHelper(world.size, n / 5, "#1c2433", "#141a26");
-    grid.rotation.x = Math.PI / 2;
-    grid.position.z = 0.03;
-    this.group.add(grid);
-
-    const border = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.PlaneGeometry(world.size, world.size)),
-      new THREE.LineBasicMaterial({ color: "#3a4a66" }),
-    );
-    border.position.z = 0.05;
-    this.group.add(border);
-
-    const box = new THREE.BoxGeometry(1, 1, 1).translate(0, 0, 0.5);
-    this.obstacles = new THREE.InstancedMesh(
-      box,
-      new THREE.MeshStandardMaterial({ roughness: 0.8, metalness: 0.05 }),
-      n * n,
-    );
-    this.obstacles.count = 0;
-    this.obstacles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.obstacles.frustumCulled = false;
-    this.group.add(this.obstacles);
-
-    this.frontierMesh = new THREE.InstancedMesh(
-      new THREE.OctahedronGeometry(1, 0),
-      new THREE.MeshBasicMaterial({ color: "#ffb020", transparent: true, opacity: 0.85 }),
-      MAX_FRONTIERS,
-    );
-    this.frontierMesh.count = 0;
-    this.frontierMesh.frustumCulled = false;
-    this.group.add(this.frontierMesh);
-
-    // Base station and pads (known to the master from the start).
-    const padMat = new THREE.MeshBasicMaterial({ color: "#5ec8ff", transparent: true, opacity: 0.6 });
-    for (const [x, y] of pads) {
-      const pad = new THREE.Mesh(new THREE.RingGeometry(1.1, 1.5, 4, 1, Math.PI / 4), padMat);
-      pad.position.set(x, y, 0.1);
-      this.group.add(pad);
-    }
-    const station = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.8, 0.8, 12, 12).rotateX(Math.PI / 2).translate(0, 0, 6),
-      new THREE.MeshBasicMaterial({ color: "#5ec8ff" }),
-    );
-    station.position.set(world.base[0] - 14, world.base[1], 0);
-    this.group.add(station);
+    this.targets.frustumCulled = false;
+    this.group.add(this.shell, this.targets, this.entryGroup, this.candGroup);
   }
 
-  applyCells(cells: MapCells): void {
-    const { idx, s, h } = cells;
-    if (!idx.length) return;
-    const n = this.world.n;
-    const c = this.world.cell;
-    const half = this.world.size / 2;
-    for (let k = 0; k < idx.length; k++) {
-      const ix = Math.floor(idx[k] / n);
-      const iy = idx[k] % n;
-      const t = (iy * n + ix) * 4;
-      this.knownCells++;
-      this.cellState[idx[k]] = s[k];
-      this.cellHeight[idx[k]] = h[k];
-      if (s[k] === 2) {
-        heightColor(h[k], this.color);
-        this.data.set([this.color.r * 90, this.color.g * 90, this.color.b * 90, 255], t);
-        this.dummy.position.set(-half + (ix + 0.5) * c, -half + (iy + 0.5) * c, 0);
-        this.dummy.scale.set(c * 0.94, c * 0.94, Math.max(h[k], 0.2));
-        this.dummy.updateMatrix();
-        const i = this.obstacles.count++;
-        this.instCell[i] = idx[k];
-        this.obstacles.setMatrixAt(i, this.dummy.matrix);
-        this.obstacles.setColorAt(i, this.color);
-        this.obstacleCells++;
-      } else {
-        this.data.set(FREE, t);
+  build(b: BuildingInfo, cfg: SimConfig): void {
+    this.clear();
+    const n = b.shape[0] * b.shape[1] * b.shape[2];
+    this.rgb = new Uint16Array(n);
+    this.q = new Uint8Array(n);
+    this.seen = new Uint16Array(n);
+    const near = cfg.scan_near ?? 2;
+    this.threshold = (cfg.cam_range - cfg.proper_scan_range) / (cfg.cam_range - near);
+    this.cloud = new PointCloud(b.shape, this.pointSize);
+    this.cloud.material.clippingPlanes = this.clip;
+    this.group.add(this.cloud.points);
+    this.dressing = siteDressing(b);
+    this.group.add(this.dressing);
+
+    // "Empty map" of the interior: one translucent box per estimated floor.
+    const [x0, y0, x1, y1] = b.bbox;
+    for (let k = 0; k < b.floors; k++) {
+      const box = new THREE.BoxGeometry(x1 - x0, y1 - y0, b.story);
+      const fill = new THREE.Mesh(
+        box,
+        new THREE.MeshBasicMaterial({ color: "#5ec8ff", transparent: true, opacity: 0.025, depthWrite: false, side: THREE.BackSide }),
+      );
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(box),
+        new THREE.LineBasicMaterial({ color: "#5ec8ff", transparent: true, opacity: 0.22 }),
+      );
+      for (const o of [fill, edges]) {
+        o.position.set((x0 + x1) / 2, (y0 + y1) / 2, k * b.story + b.story / 2);
+        this.shell.add(o);
       }
-    }
-    this.texture.needsUpdate = true;
-    this.obstacles.instanceMatrix.needsUpdate = true;
-    if (this.obstacles.instanceColor) this.obstacles.instanceColor.needsUpdate = true;
-  }
-
-  /** Recolor ground and obstacle columns by time since last seen (or restore height colors). */
-  paintFreshness(fresh: Freshness, staleAfter: number, enabled: boolean): void {
-    if (!this.world) return;
-    const on = enabled && fresh.ready;
-    if (!on && !this.painted) return;
-    const n = this.world.n;
-    const now = fresh.now();
-    const c = this.color;
-    for (let flat = 0; flat < n * n; flat++) {
-      const st = this.cellState[flat];
-      if (st === 0) continue;
-      const ix = Math.floor(flat / n);
-      const iy = flat - ix * n;
-      const t = (iy * n + ix) * 4;
-      const age = on ? fresh.age(flat, now) : -1;
-      if (age >= 0) {
-        freshnessColor(age, staleAfter, c);
-        const k = st === 2 ? 110 : 150;
-        this.data[t] = c.r * k;
-        this.data[t + 1] = c.g * k;
-        this.data[t + 2] = c.b * k;
-      } else if (st === 2) {
-        heightColor(this.cellHeight[flat], c);
-        this.data.set([c.r * 90, c.g * 90, c.b * 90, 255], t);
-      } else {
-        this.data.set(FREE, t);
-      }
-    }
-    for (let i = 0; i < this.obstacles.count; i++) {
-      const flat = this.instCell[i];
-      const age = on ? fresh.age(flat, now) : -1;
-      if (age >= 0) freshnessColor(age, staleAfter, c);
-      else heightColor(this.cellHeight[flat], c);
-      this.obstacles.setColorAt(i, c);
-    }
-    this.texture.needsUpdate = true;
-    if (this.obstacles.instanceColor) this.obstacles.instanceColor.needsUpdate = true;
-    this.painted = on;
-  }
-
-  update(states: DroneState[], swarm: SwarmView, frontiers: [number, number, number][],
-         candidates: Candidate[], time: number): void {
-    this.updateDrones(states, swarm);
-    this.updateFrontiers(frontiers, time);
-    this.updateCandidates(candidates, time);
-  }
-
-  private updateDrones(states: DroneState[], swarm: SwarmView): void {
-    const seen = new Set<number>();
-    for (const s of states) {
-      seen.add(s.id);
-      let d = this.drones.get(s.id);
-      if (!d) d = this.addDrone(s);
-      const view = swarm.get(s.id);
-      if (!view) continue;
-      const pos = view.pos;
-      const yaw = view.yaw();
-      if (d.mode !== s.mode) {
-        d.mode = s.mode;
-        const col = MODE_COLORS[s.mode];
-        d.arrowMat.color.set(col);
-        d.frustum.setColor(col);
-        d.pathMat.color.set(col);
-        d.labelEl.style.borderColor = col;
-      }
-      d.marker.position.copy(pos);
-      d.arrow.rotation.z = yaw;
-      d.labelEl.classList.toggle("crashed", s.crashed);
-      d.labelEl.classList.toggle("selected", swarm.selected === s.id);
-      d.label.visible = this.layers.labels;
-
-      const dropAttr = d.drop.geometry.getAttribute("position") as THREE.BufferAttribute;
-      dropAttr.setXYZ(0, pos.x, pos.y, pos.z);
-      dropAttr.setXYZ(1, pos.x, pos.y, pos.z - s.agl);
-      dropAttr.needsUpdate = true;
-
-      d.frustum.group.visible = this.layers.frustums && s.cam_on;
-      if (d.frustum.group.visible) d.frustum.update(pos, yaw, s.agl);
-
-      d.path.visible = this.layers.paths && s.path.length > 0;
-      if (d.path.visible) {
-        const attr = d.path.geometry.getAttribute("position") as THREE.BufferAttribute;
-        attr.setXYZ(0, pos.x, pos.y, pos.z);
-        const m = Math.min(s.path.length, MAX_PATH_POINTS - 1);
-        for (let i = 0; i < m; i++) attr.setXYZ(i + 1, s.path[i][0], s.path[i][1], s.path[i][2]);
-        attr.needsUpdate = true;
-        d.path.geometry.setDrawRange(0, m + 1);
-        d.path.computeLineDistances();
-      }
-    }
-    for (const [id, d] of this.drones) {
-      if (!seen.has(id)) {
-        this.removeDrone(d);
-        this.drones.delete(id);
-      }
+      const el = document.createElement("div");
+      el.className = "floor-label";
+      el.textContent = `F${k + 1}`;
+      const label = new CSS2DObject(el);
+      label.position.set(x0 - 1.5, y0 - 1.5, k * b.story + b.story / 2);
+      this.shell.add(label);
     }
   }
 
-  private addDrone(s: DroneState): MapDrone {
-    const col = MODE_COLORS[s.mode];
-    const marker = new THREE.Group();
-    const arrowMat = new THREE.MeshBasicMaterial({ color: col });
-    // Flat arrowhead pointing along +x (heading).
-    const shape = new THREE.Shape();
-    shape.moveTo(3.2, 0);
-    shape.lineTo(-1.8, 2.0);
-    shape.lineTo(-0.8, 0);
-    shape.lineTo(-1.8, -2.0);
-    shape.closePath();
-    const arrow = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.5, bevelEnabled: false }), arrowMat);
-    marker.add(arrow);
-
-    const labelEl = document.createElement("div");
-    labelEl.className = "drone-label";
-    labelEl.textContent = `D${s.id}`;
-    labelEl.style.borderColor = col;
-    const label = new CSS2DObject(labelEl);
-    label.center.set(0.5, 1.8);
-    marker.add(label);
-
-    const dropGeo = new THREE.BufferGeometry();
-    dropGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
-    const drop = new THREE.Line(dropGeo, new THREE.LineBasicMaterial({ color: "#8b93a7", transparent: true, opacity: 0.35 }));
-    drop.frustumCulled = false;
-
-    const frustum = new FrustumView(this.camera, col, 0.1);
-
-    const pathGeo = new THREE.BufferGeometry();
-    pathGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_PATH_POINTS * 3), 3));
-    const pathMat = new THREE.LineDashedMaterial({ color: col, dashSize: 2, gapSize: 1.5 });
-    const path = new THREE.Line(pathGeo, pathMat);
-    path.frustumCulled = false;
-
-    this.group.add(marker, drop, frustum.group, path);
-    const d: MapDrone = { marker, arrow, arrowMat, drop, frustum, path, pathMat, label, labelEl, mode: s.mode };
-    this.drones.set(s.id, d);
-    return d;
+  setClock(t: number, running: boolean, rtf: number): void {
+    this.simNow = t;
+    this.wallAt = performance.now();
+    this.rate = running ? rtf : 0;
   }
 
-  private removeDrone(d: MapDrone): void {
-    d.marker.remove(d.label);
-    d.labelEl.remove();
-    this.group.remove(d.marker, d.drop, d.frustum.group, d.path);
-    d.frustum.dispose();
+  private now(): number {
+    return this.simNow + ((performance.now() - this.wallAt) / 1000) * this.rate;
   }
 
-  private updateFrontiers(frontiers: [number, number, number][], time: number): void {
-    const m = this.layers.frontiers ? Math.min(frontiers.length, MAX_FRONTIERS) : 0;
-    for (let i = 0; i < m; i++) {
-      const [x, y, gain] = frontiers[i];
-      const sz = 0.7 + Math.min(Math.sqrt(gain) * 0.25, 1.6);
-      this.dummy.position.set(x, y, 2.5 + 0.6 * Math.sin(time * 2 + i));
-      this.dummy.rotation.set(0, 0, time + i);
-      this.dummy.scale.set(sz, sz, sz * 1.4);
-      this.dummy.updateMatrix();
-      this.frontierMesh.setMatrixAt(i, this.dummy.matrix);
+  setClip(planes: THREE.Plane[]): void {
+    this.clip.length = 0;
+    this.clip.push(...planes);
+  }
+
+  setPointSize(size: number): void {
+    this.pointSize = size;
+    if (this.cloud) this.cloud.material.size = size;
+  }
+
+  applyDeltas(m: MapDeltas): void {
+    if (!this.cloud) return;
+    if (m.n) {
+      const idx = new Int32Array(decodeB64(m.idx));
+      const rgb = new Uint16Array(decodeB64(m.rgb));
+      const q = new Uint8Array(decodeB64(m.q));
+      for (let i = 0; i < idx.length; i++) {
+        this.rgb[idx[i]] = rgb[i];
+        this.q[idx[i]] = q[i];
+      }
     }
-    this.dummy.rotation.set(0, 0, 0);
-    this.frontierMesh.count = m;
-    this.frontierMesh.instanceMatrix.needsUpdate = true;
-  }
-
-  private updateCandidates(candidates: Candidate[], time: number): void {
-    for (const c of candidates) {
-      if (c.confirmed) {
-        this.candidates.get(c.id)?.removeFromParent();
-        this.candidates.delete(c.id);
-        if (!this.confirmed.has(c.id)) {
-          const g = beacon("#3ddc97");
-          g.position.set(c.x, c.y, 0.2);
-          this.group.add(g);
-          this.confirmed.set(c.id, g);
-        }
-        continue;
-      }
-      if (c.dismissed) {
-        this.candidates.get(c.id)?.removeFromParent();
-        this.candidates.delete(c.id);
-        continue;
-      }
-      let g = this.candidates.get(c.id);
-      if (!g) {
-        g = ring("#ffb020");
-        this.group.add(g);
-        this.candidates.set(c.id, g);
-      }
-      g.position.set(c.x, c.y, 0.2);
-      g.scale.setScalar(1 + 0.25 * Math.sin(time * 4));
+    if (m.np) {
+      this.cloud.append(new Uint16Array(decodeB64(m.pts)), new Uint8Array(decodeB64(m.pcol)));
+      if (this.mode !== "texture") this.recolor();
     }
   }
 
-  dispose(): void {
-    for (const d of this.drones.values()) this.removeDrone(d);
-    this.drones.clear();
-    this.candidates.clear();
-    this.confirmed.clear();
-    this.group.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
-    this.group.clear();
-    this.texture?.dispose();
+  private painter() {
+    if (this.mode === "texture") return null;
+    const c = new THREE.Color();
+    const now = this.now();
+    return (vox: number, _r: number, _g: number, _b: number, out: Uint8Array) => {
+      if (this.mode === "quality") qualityColor(this.q[vox] / 255, this.threshold, c);
+      else {
+        const s = this.seen[vox];
+        if (s === 0) c.copy(NEVER);
+        else freshnessColor(now - (s - 1) / SEEN_UNITS_PER_S, this.staleAfter, c);
+      }
+      out[0] = c.r * 255;
+      out[1] = c.g * 255;
+      out[2] = c.b * 255;
+    };
   }
-}
 
-function ring(color: string): THREE.Group {
-  const g = new THREE.Group();
-  g.add(new THREE.Mesh(
-    new THREE.RingGeometry(2.2, 2.9, 40),
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false }),
-  ));
-  return g;
-}
+  applySeen(s: SeenDeltas): void {
+    const idx = new Int32Array(decodeB64(s.idx));
+    const t = new Uint16Array(decodeB64(s.t));
+    for (let i = 0; i < idx.length; i++) this.seen[idx[i]] = t[i];
+  }
 
-function beacon(color: string): THREE.Group {
-  const g = ring(color);
-  g.add(new THREE.Mesh(
-    new THREE.CylinderGeometry(0.4, 0.4, 30, 12, 1, true).rotateX(Math.PI / 2).translate(0, 0, 15),
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4, depthWrite: false }),
-  ));
-  g.add(new THREE.Mesh(
-    new THREE.SphereGeometry(1.0, 16, 12).translate(0, 0, 1),
-    new THREE.MeshBasicMaterial({ color }),
-  ));
-  return g;
+  /** Recolor every point (mode change, or freshness aging). */
+  recolor(): void {
+    this.cloud?.recolor(this.painter());
+  }
+
+  setTargets(list: [number, number, number, number][], cut: number): void {
+    const pos = this.targets.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const col = this.targets.geometry.getAttribute("color") as THREE.BufferAttribute;
+    let n = 0;
+    for (const [x, y, z, kind] of list) {
+      if (n >= MAX_TARGETS || z + 0.5 > cut) continue;
+      pos.setXYZ(n, x + 0.5, y + 0.5, z + 0.5);
+      if (kind === 0) col.setXYZ(n, 1.0, 0.69, 0.13);
+      else col.setXYZ(n, 0.37, 0.78, 1.0);
+      n++;
+    }
+    pos.needsUpdate = col.needsUpdate = true;
+    this.targets.geometry.setDrawRange(0, n);
+    this.targets.visible = this.layers.targets;
+  }
+
+  setEntries(entries: MapEntry[]): void {
+    const key = entries.map((e) => `${e.id}:${e.w}:${e.h}:${e.blocked}`).join("|");
+    this.entryGroup.visible = this.layers.entries;
+    if (key === this.entryKeys) return;
+    this.entryKeys = key;
+    this.entryGroup.traverse((o) => {
+      if (o instanceof CSS2DObject) o.element.remove();
+    });
+    this.entryGroup.clear();
+    for (const e of entries) {
+      const color = e.blocked ? "#ff4d4f" : "#f6e05e";
+      const [w, h] = [Math.max(e.w, 1), Math.max(e.h, 1)];
+      const frame = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.PlaneGeometry(w, h)),
+        new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }),
+      );
+      frame.renderOrder = 6;
+      frame.position.set(...e.center);
+      // Plane faces +z; turn it to face along the entry normal.
+      frame.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(...e.normal).normalize());
+      if (e.side !== "roof") frame.rotateZ(e.normal[0] !== 0 ? Math.PI / 2 : 0);
+      const arrow = new THREE.ArrowHelper(new THREE.Vector3(...e.normal), new THREE.Vector3(...e.center).addScaledVector(new THREE.Vector3(...e.normal), -2.5), 2.2, color, 0.7, 0.45);
+      const el = document.createElement("div");
+      el.className = "entry-label" + (e.blocked ? " blocked" : "");
+      el.textContent = `#${e.id} ${e.w.toFixed(0)}×${e.h.toFixed(0)}${e.blocked ? " blocked" : ""}`;
+      const label = new CSS2DObject(el);
+      label.position.set(e.center[0], e.center[1], e.center[2] + h / 2 + 0.8);
+      this.entryGroup.add(frame, arrow, label);
+    }
+  }
+
+  setCandidates(cands: Candidate[], t: number, cut: number): void {
+    for (const c of cands) {
+      let m = this.candMeshes.get(c.id);
+      if (!m) {
+        m = new THREE.Mesh(
+          new THREE.SphereGeometry(0.6, 16, 12),
+          new THREE.MeshBasicMaterial({ color: "#ffb020", transparent: true, opacity: 0.8, depthTest: false }),
+        );
+        m.renderOrder = 7;
+        this.candMeshes.set(c.id, m);
+        this.candGroup.add(m);
+      }
+      m.position.set(...c.pos);
+      const mat = m.material as THREE.MeshBasicMaterial;
+      mat.color.set(c.confirmed ? "#3ddc97" : c.dismissed ? "#5a6273" : "#ffb020");
+      m.scale.setScalar(c.confirmed ? 1.2 : 0.8 + 0.3 * Math.sin(t * 5 + c.id));
+      m.visible = c.pos[2] < cut;
+    }
+  }
+
+  update(): void {
+    this.shell.visible = this.layers.shell;
+  }
+
+  clear(): void {
+    if (this.cloud) {
+      this.group.remove(this.cloud.points);
+      this.cloud.dispose();
+      this.cloud = null;
+    }
+    for (const g of [this.shell, this.entryGroup, this.dressing]) {
+      g?.traverse((o) => {
+        if (o instanceof CSS2DObject) o.element.remove();
+      });
+    }
+    this.shell.clear();
+    this.entryGroup.clear();
+    this.entryKeys = "";
+    if (this.dressing) this.group.remove(this.dressing);
+    this.candGroup.clear();
+    this.candMeshes.clear();
+  }
 }
