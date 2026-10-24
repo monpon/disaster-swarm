@@ -63,6 +63,7 @@ VERIFY_PENALTY = 25.0  # verify tiles cost this much extra while exploration is 
 VERIFY_NPASS = 2  # surfaces seen from fewer separate passes than this need a re-scan
 VERIFY_RESID = 0.10  # ... as do surfaces the smoother finds rougher than this (m)
 SMOOTH_BATCH = 5000
+RELAY_HOLD_S = 45.0  # exterior relays hold station this long, then leapfrog
 RELAY_SETTLE_S = 10.0  # a relay on station this long without restoring contact -> chain another
 
 _SIX = ndimage.generate_binary_structure(3, 1)
@@ -386,6 +387,7 @@ class MasterController:
             self._dispatch_investigations(t)
             self._assign_entries(t)
             self._allocate(t)
+        if self.phase in ("scout", "survey", "interior", "verify"):
             self._plan_relays(t)
         self._check_paths(t)
 
@@ -1204,8 +1206,12 @@ class MasterController:
     def _plan_relays(self, t: float) -> None:
         for rl in [r for r in self.drones if r.mode == RELAY]:
             served = self.drones[rl.serves] if rl.serves is not None else None
+            exterior = self.phase in ("scout", "survey")
             keep = served is not None and not served.crashed and (
-                served.mode in (ENTER, EXPLORE, INVESTIGATE, RELAY) or self.lost(served, t))
+                served.mode in (ENTER, EXPLORE, INVESTIGATE, RELAY, SURVEY) or self.lost(served, t))
+            if keep and exterior and rl.arrived_t is not None and t - rl.arrived_t > RELAY_HOLD_S \
+                    and not self.lost(served, t):
+                keep = False  # leapfrog: the sweeper has moved on, go and sweep (or relay again further out)
             if not keep:
                 why = "crashed" if served is not None and served.crashed else (served.mode if served else "none")
                 self._event(t, f"Drone {rl.id} released from relay duty (served drone: {why})", "info")
@@ -1234,11 +1240,12 @@ class MasterController:
         if len(relays) >= max(1, len(self.drones) // 3):
             return
         served = {r.serves for r in relays}
+        exterior = self.phase in ("scout", "survey")
         for r in self.drones:
-            if r.mode not in (EXPLORE, INVESTIGATE) or r.id in served or len(r.trail) < 3 or self.lost(r, t):
+            if r.mode not in (EXPLORE, INVESTIGATE, SURVEY) or r.id in served or len(r.trail) < 3 or self.lost(r, t):
                 continue
-            if r.link_cap >= self.frame_need:
-                continue
+            if r.link_cap >= self.frame_need * (1.5 if exterior else 1.0):
+                continue  # outside, act before the link is gone: the whole sweep fans out at once
             if self._post_relay(r, relays, t, rescue=False):
                 return
 
@@ -1259,6 +1266,8 @@ class MasterController:
             if score >= RELAY_TARGET_BPS:
                 break
         ok_modes = (EXPLORE, WAIT) if not rescue else (EXPLORE, WAIT, IDLE, CHARGING)
+        if self.phase in ("scout", "survey"):
+            ok_modes = ok_modes + (SURVEY,)  # everyone is sweeping: a sweeper stays behind to relay
         helpers = [h for h in self.drones if h.mode in ok_modes and h.id != r.id and not self.lost(h, t)
                    and (not h.grounded or h.soc >= 0.8)]
         if best is None or not helpers:
@@ -1267,6 +1276,8 @@ class MasterController:
         look = r.pos - best
         if not self._fly_to(h, best, float(np.arctan2(look[1], look[0]))):
             return False
+        if not self._inside(h.pos):
+            h.speed = 3.0  # outside: no need to creep
         self._release(h)
         h.task, h.task_vantage, h.serves, h.arrived_t = None, None, r.id, None
         self._set_mode(h, RELAY, t)
