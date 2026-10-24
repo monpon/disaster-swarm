@@ -31,7 +31,7 @@ the protocol, so one lost chunk (about 7 per frame) loses the frame: 5% packet l
 | Python relay on the laptop (loopback) | 95.5%, 99.2% | 23.3 to 24.4 | RC decoded, telemetry, 0 drops |
 | ESP32-S3, MicroPython, v1 (poll loop) | 19.2% | 4.6 | 47 dropped sends |
 | ESP32-S3, v2 (recv, GC off, send retries, pm off) | 71.4% | 17.6 | 0 drops, 0 retries, GC 1 ms |
-| ESP32-S3, v3 (receive thread) | not measured | | drone refused joins before it ran |
+| ESP32-S3, v3 (receive thread) | 86.1%, 80.3% | 21.2, 19.8 | 0 drops, 0 retries, longest loop gap 16 to 17 ms, receive queue depth never above 0 |
 
 An earlier S3 v2 run with `readinto` produced 0% intact frames. That was a bug: MicroPython's `readinto` keeps
 reading until the buffer is full, concatenating datagrams. Do not use it for UDP.
@@ -90,15 +90,20 @@ the S3 forwarded 1757 packets and the laptop received 1752, so the loss is betwe
 ## 5. Recommendation
 
 1. Use the Pi 3 for the relay, repeater, ROS and IMU. It keeps 95 to 99% of frames and the code exists.
-2. Treat the S3 as an optional small repeater or IMU node. To reach about 95% it needs the receive-thread change
-   (written, untested) and probably a firmware build with a larger `CONFIG_LWIP_UDP_RECVMBOX_SIZE`, or a C rewrite.
+2. Treat the S3 as an optional small repeater or IMU node. The receive-thread change took it from 71% to 80 to 86%
+   of frames. The rest looks like about 1% packet loss over the radio (the S3 forwarded 2018 to 2044 packets per run
+   against about 2030 to 2060 sent by the drone, and the laptop received 7 fewer than the S3 sent). Software cannot repair
+   that: the protocol has no retransmit. Going further would take a custom firmware build or a C rewrite, with no
+   guarantee.
+   JPEG downscaling cannot run on the S3 under MicroPython (no JPEG codec), so it stays a Pi/laptop feature.
 3. The Pico 2 W has not been evaluated: it did not enumerate on any cable tried.
 
 ## 6. What is not verified
 
 - Pi repeater scripts (`pi/`) have never run on a Pi. First-boot cloud-init config has not been booted.
 - Concurrent AP + client on the Pi 3 radio.
-- S3 v3, more than one client, runs longer than 10 s, latency.
+- S3 v3 with more than two runs, more than one client, runs longer than 10 s, latency. Back-to-back S3 runs sometimes fail
+  to rejoin the drone for a while (the drone seems to release the old client slowly).
 - IMU drivers (`esp32/mpu.py`) and any Pi-side I2C reader.
 - RC behaviour in flight (props were off for all tests).
 
