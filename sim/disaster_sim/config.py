@@ -61,9 +61,10 @@ class SimConfig:
     max_speed: float = 6.0
     indoor_speed: float = 1.5
 
-    # What the master knows before launch: nothing about the building (it scouts for it). Set
-    # known_outline to hand it the footprint instead.
-    known_outline: bool = False
+    # What the master knows before launch. True: the operator's rough footprint of the building
+    # (so every drone has a perimeter leg from the first second). False: nothing, and the swarm
+    # scouts the site to find it first.
+    known_outline: bool = True
     scout_alt: float = 6.0
     scout_spacing: float = 16.0
     scout_max_s: float = 600.0  # cap on scouting the site

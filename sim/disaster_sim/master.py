@@ -137,6 +137,7 @@ class DroneRecord:
     leg_map: list | None = None  # path index -> leg waypoint index
     leg_path: list | None = None
     leg_partial: bool = False  # the leg path stops at the edge of cleared space
+    leg_replan_t: float = -1.0
     win: list | None = None  # stuck-detection window: start time, start position, commanded distance
 
 
@@ -810,6 +811,13 @@ class MasterController:
                         r.scout_tile, r.scout_ready_t = None, t + SCOUT_LOOK_S
                     if self.phase == "operate" and not partial_end and self._open_legs():
                         self._start_survey_leg(r, t)  # straight on to the next leg: no waiting
+                elif (r.mode == SURVEY and r.leg_partial and r.leg is not None and r.path
+                      and np.linalg.norm(r.pos - np.array(r.path[-1])) < 5.0 and t - r.leg_replan_t > 1.0):
+                    # nearing the edge of cleared space: plan the next stretch now, without stopping
+                    r.leg_replan_t = t
+                    r.leg["owner"], r.leg = None, None
+                    self._start_survey_leg(r, t)
+                    r.leg_replan_t = t
                 elif r.mode == ENTER:
                     self._step_entry(r, t)
                 elif r.mode == INVESTIGATE:
@@ -974,7 +982,11 @@ class MasterController:
 
     def _perimeter_open(self) -> bool:
         """Is there outside left to fly and room in the perimeter team?"""
-        return bool(self._open_legs()) and sum(1 for d in self.drones if d.leg is not None) < PERIM_TEAM
+        # Until an opening is confirmed there is nothing to enter by, so the whole fleet flies the
+        # outside (every drone has a leg from the start); afterwards a team of PERIM_TEAM stays on it.
+        entering = any(e.confirmed and not e.blocked and not e.retired for e in self.entries)
+        quota = PERIM_TEAM if entering else len(self.drones)
+        return bool(self._open_legs()) and sum(1 for d in self.drones if d.leg is not None) < quota
 
     def _open_legs(self) -> list[dict]:
         return [g for g in self.legs if not g["done"] and g["owner"] is None]
