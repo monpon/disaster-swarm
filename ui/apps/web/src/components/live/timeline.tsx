@@ -1,7 +1,7 @@
 import { Pause, Play } from "lucide-react";
 import { useState } from "react";
 
-import { incident, timelineEvents } from "@/lib/mock";
+import { mission, timelineEvents } from "@/lib/mock";
 
 /** Mission scrubber. Ticks mark findings; the orange head is "now". */
 export function Timeline() {
@@ -25,7 +25,7 @@ export function Timeline() {
         <div className="absolute top-1.5 left-[96%] size-4 -translate-x-1/2 rounded-full border-2 border-white bg-orange shadow-[0_0_0_1px_var(--color-orange-edge)]" />
       </div>
       <span className="text-xs font-semibold text-orange-edge">Live</span>
-      <span className="font-mono text-xs font-medium">{incident.elapsed}</span>
+      <span className="font-mono text-xs font-medium">{mission.elapsed}</span>
     </div>
   );
 }

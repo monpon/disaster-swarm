@@ -11,10 +11,10 @@ import { Row, Section, Select } from "@/components/form";
 import { PlanMap } from "@/components/setup/plan-map";
 import { ConsoleBody } from "@/components/shell/console-body";
 import { TopBar } from "@/components/shell/top-bar";
-import { fleet, incident } from "@/lib/mock";
+import { fleet, mission } from "@/lib/mock";
 
 export const Route = createFileRoute("/_app/setup")({
-  head: () => ({ meta: [{ title: `Mission setup: ${incident.address}` }] }),
+  head: () => ({ meta: [{ title: `Mission setup: ${mission.address}` }] }),
   component: SetupPage,
 });
 
@@ -38,7 +38,7 @@ function SetupPage() {
     <>
       <TopBar>
         <button type="button" className="flex h-[34px] items-center gap-2 rounded-lg px-2.5 shadow-[inset_0_0_0_1px_var(--color-line)] hover:bg-panel">
-          <span className="text-sm font-semibold">{incident.address}</span>
+          <span className="text-sm font-semibold">{mission.address}</span>
           <span className="text-[13px] text-muted">New mission</span>
           <ChevronDown className="size-3 text-muted" />
         </button>

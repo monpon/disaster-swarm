@@ -4,7 +4,7 @@ import { cn } from "@swarm/ui/lib/utils";
 import { ChevronDown, Layers, Minus, Plus, SquareDashed } from "lucide-react";
 import { useState } from "react";
 
-import { findings, incident, liveDrones, type Finding } from "@/lib/mock";
+import { findings, mission, liveDrones, type Finding } from "@/lib/mock";
 
 import { findingStyle, Quad } from "../icons";
 import { Stage } from "../map/stage";
@@ -158,11 +158,11 @@ export function ScanMap({
       <div className="absolute inset-x-3 bottom-3 flex items-end gap-4">
         <div className="flex flex-col gap-1.5 rounded-lg bg-white/95 px-3 py-2.5 shadow-[0_0_0_1px_var(--color-line)]">
           <div className="flex items-baseline gap-1.5">
-            <span className="font-mono text-lg font-semibold">{incident.coverage}%</span>
-            <span className="text-xs text-muted">mapped, {incident.roomsLeft} rooms left</span>
+            <span className="font-mono text-lg font-semibold">{mission.coverage}%</span>
+            <span className="text-xs text-muted">mapped, {mission.roomsLeft} rooms left</span>
           </div>
           <div className="h-1 w-[180px] rounded-full bg-[#e3e3e0]">
-            <div className="h-1 rounded-full bg-orange" style={{ width: `${incident.coverage}%` }} />
+            <div className="h-1 rounded-full bg-orange" style={{ width: `${mission.coverage}%` }} />
           </div>
         </div>
         <div className="flex flex-col gap-[3px] pb-1">

@@ -12,11 +12,11 @@ import { ScanMap } from "@/components/live/scan-map";
 import { Timeline } from "@/components/live/timeline";
 import { ConsoleBody } from "@/components/shell/console-body";
 import { TopBar } from "@/components/shell/top-bar";
-import { incident } from "@/lib/mock";
+import { mission } from "@/lib/mock";
 import { usePaneCollapse } from "@/lib/use-pane-collapse";
 
 export const Route = createFileRoute("/_app/live")({
-  head: () => ({ meta: [{ title: `Live: ${incident.address}` }] }),
+  head: () => ({ meta: [{ title: `Live: ${mission.address}` }] }),
   component: LivePage,
 });
 
@@ -60,13 +60,13 @@ function LivePage() {
         }
       >
         <button type="button" className="flex h-[34px] items-center gap-2 rounded-lg px-2.5 shadow-[inset_0_0_0_1px_var(--color-line)] hover:bg-panel">
-          <span className="text-sm font-semibold">{incident.address}</span>
-          <span className="text-[13px] text-muted">{incident.type}</span>
+          <span className="text-sm font-semibold">{mission.address}</span>
+          <span className="text-[13px] text-muted">{mission.type}</span>
           <ChevronDown className="size-3 text-muted" />
         </button>
         <span className="flex items-center gap-1.5">
           <span className="size-2 rounded-full bg-person" />
-          <span className="font-mono text-[13px] font-medium">{incident.elapsed}</span>
+          <span className="font-mono text-[13px] font-medium">{mission.elapsed}</span>
         </span>
       </TopBar>
       <ConsoleBody>

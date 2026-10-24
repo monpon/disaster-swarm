@@ -12,7 +12,7 @@ const FOUND: { title: string; where: string; tone: "person" | "hazard"; Icon: Co
 
 const BEATS = [
   { Icon: Eye, title: "See everyone at once.", body: "Every person and every danger in the building, on one map." },
-  { Icon: ListOrdered, title: "Choose who to reach first.", body: "Your crew sets the order. Missions keeps the picture current." },
+  { Icon: ListOrdered, title: "Choose who to reach first.", body: "Your crew sets the order. The swarm keeps the picture current." },
   { Icon: Shield, title: "Go in knowing what's there.", body: "Fewer surprises behind closed doors." },
 ];
 
@@ -33,7 +33,7 @@ export function Pitch() {
             <span className="text-orange">Not searching for them.</span>
           </h2>
           <p className="max-w-[560px] text-lg leading-8 text-muted md:text-xl md:leading-[32px]">
-            Missions finds the people and the dangers in a building at the same time, so your crew can decide who to reach first and go straight there.
+            The swarm finds the people and the dangers in a building at the same time, so your crew can decide who to reach first and go straight there.
           </p>
         </div>
         <div className="flex w-full max-w-[460px] flex-col gap-3">

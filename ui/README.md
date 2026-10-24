@@ -1,6 +1,6 @@
-# Missions console (UI)
+# Swarm console (UI)
 
-Web console for the disaster swarm: incident setup, the live 3D map with drone feeds and findings, fleet configuration, settings, and a landing page. Built from the "v2 — orange" Paper designs.
+Web console for the disaster swarm: mission setup, the live 3D map with drone feeds and findings, fleet configuration, settings, and a landing page. Built from the "v2 — orange" Paper designs.
 
 Data is mocked in `apps/web/src/lib/mock.ts` until the console is wired to the edge server.
 
@@ -27,7 +27,7 @@ bun run check-types
 | Path | Screen |
 | --- | --- |
 | `/` | Landing page: scroll story (one drone vs. the swarm, shared map, split screen) |
-| `/incidents/new` | New incident: address search and incident type |
+| `/missions/new` | New mission: address search and mission type |
 | `/setup` | Mission setup: floor plan, geofence, drones, search settings |
 | `/live` | Live console: point cloud map, feeds, findings, crew channel |
 | `/fleet` | Drone list and per-drone configuration |

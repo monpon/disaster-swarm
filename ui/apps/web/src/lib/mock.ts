@@ -1,5 +1,5 @@
 /**
- * Demo incident data. Stands in for the edge server's live feed until the
+ * Demo mission data. Stands in for the edge server's live feed until the
  * console is wired to ROS 2. Map coordinates are pixels on the rendered scan
  * (public/assets/cloud.png at 1019x636), produced by scripts/render-assets.
  */
@@ -33,7 +33,7 @@ export interface Drone {
   holding?: boolean;
 }
 
-export const incident = {
+export const mission = {
   address: "418 Elm St",
   city: "Springfield, IL 62704",
   type: "Structural collapse",
@@ -178,13 +178,13 @@ export const addressResults = [
   { id: "a4", street: "1120 Monroe St", city: "Springfield, IL 62703", distance: "2.4 mi" },
 ];
 
-export const recentIncidents = [
+export const recentMissions = [
   { id: "r1", place: "1120 Monroe St, Apt 3B", meta: "Welfare check, Oct 22" },
   { id: "r2", place: "Lincoln Square Offices, fl 4", meta: "Drill, Oct 19" },
   { id: "r3", place: "27 Walnut Ct", meta: "Gas leak, Oct 11" },
 ];
 
-export const incidentTypes = ["Structural collapse", "Earthquake", "Welfare check", "Gas leak", "Other"] as const;
+export const missionTypes = ["Structural collapse", "Earthquake", "Welfare check", "Gas leak", "Other"] as const;
 
 export const detectionClasses = [
   { id: "person", label: "Person", color: "var(--color-person)", enabled: true, threshold: 0.6, speak: true },

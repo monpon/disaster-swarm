@@ -13,7 +13,7 @@ import { useStory } from "@/components/landing/story";
 import { Vitals } from "@/components/landing/vitals";
 
 export const Route = createFileRoute("/")({
-  head: () => ({ meta: [{ title: "Missions: when every second counts, send the swarm" }] }),
+  head: () => ({ meta: [{ title: "Swarm: when every second counts, send the swarm" }] }),
   component: Landing,
 });
 
@@ -24,7 +24,7 @@ function Landing() {
       <header className="sticky top-0 z-30 flex h-[68px] items-center gap-6 border-b border-line-soft bg-white/90 px-4 backdrop-blur md:px-16">
         <Link to="/" className="flex items-center gap-2.5">
           <Mark />
-          <span className="text-lg font-bold tracking-[-0.02em]">Missions</span>
+          <span className="text-lg font-bold tracking-[-0.02em]">Swarm</span>
         </Link>
         <div className="flex-1" />
         <nav className="hidden items-center gap-7 text-sm font-medium text-[#3a3a38] md:flex">
@@ -68,7 +68,7 @@ function Landing() {
               Open the console
               <ArrowRight className="size-4" />
             </Link>
-            <Link to="/incidents/new" className="text-center text-sm font-medium text-white/90 underline-offset-4 hover:underline">
+            <Link to="/missions/new" className="text-center text-sm font-medium text-white/90 underline-offset-4 hover:underline">
               or start a demo mission
             </Link>
           </div>
@@ -79,12 +79,12 @@ function Landing() {
         <div className="flex flex-1 flex-col gap-3">
           <span className="flex items-center gap-2.5">
             <Mark />
-            <span className="text-[17px] font-bold tracking-[-0.02em]">Missions</span>
+            <span className="text-[17px] font-bold tracking-[-0.02em]">Swarm</span>
           </span>
           <span className="text-sm text-muted">Drone swarms that help rescuers find people faster.</span>
         </div>
         <FooterCol title="Story" links={[["One vs. many", "#race"], ["How it works", "#how"], ["Checking on people", "#vitals"]]} />
-        <FooterCol title="Console" links={[["Live map", "/live"], ["Start a mission", "/incidents/new"], ["Fleet", "/fleet"]]} />
+        <FooterCol title="Console" links={[["Live map", "/live"], ["Start a mission", "/missions/new"], ["Fleet", "/fleet"]]} />
         <FooterCol title="Settings" links={[["Detection", "/settings/detection"], ["Edge server", "/settings/edge"]]} />
       </footer>
     </div>

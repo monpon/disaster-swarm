@@ -6,17 +6,17 @@ import { useMemo, useState } from "react";
 
 import { Mark } from "@/components/icons";
 import { Stage } from "@/components/map/stage";
-import { addressResults, incidentTypes, recentIncidents } from "@/lib/mock";
+import { addressResults, missionTypes, recentMissions } from "@/lib/mock";
 
-export const Route = createFileRoute("/incidents/new")({
-  head: () => ({ meta: [{ title: "New incident" }] }),
-  component: NewIncidentPage,
+export const Route = createFileRoute("/missions/new")({
+  head: () => ({ meta: [{ title: "New mission" }] }),
+  component: NewMissionPage,
 });
 
-function NewIncidentPage() {
+function NewMissionPage() {
   const [query, setQuery] = useState("418 Elm");
   const [picked, setPicked] = useState("a1");
-  const [type, setType] = useState<(typeof incidentTypes)[number]>("Structural collapse");
+  const [type, setType] = useState<(typeof missionTypes)[number]>("Structural collapse");
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
     return q ? addressResults.filter((r) => `${r.street} ${r.city}`.toLowerCase().includes(q)) : addressResults;
@@ -30,9 +30,9 @@ function NewIncidentPage() {
           <Mark />
         </Link>
         <nav className="flex items-center gap-2 text-sm">
-          <span className="font-medium text-muted">Incidents</span>
+          <span className="font-medium text-muted">Missions</span>
           <ChevronRight className="size-3 text-faint" />
-          <span className="font-semibold">New incident</span>
+          <span className="font-semibold">New mission</span>
         </nav>
         <div className="flex-1" />
         <span className="flex h-7 items-center gap-1.5 rounded-full bg-[#eef8f1] px-2.5 text-xs font-medium text-[#166534]">
@@ -45,7 +45,7 @@ function NewIncidentPage() {
         <aside className="flex w-[440px] shrink-0 flex-col border-r border-line-strong bg-white">
           <div className="flex min-h-0 flex-1 flex-col gap-[22px] overflow-y-auto px-5 py-[22px]">
             <div className="flex flex-col gap-1">
-              <h1 className="text-[22px] font-semibold tracking-[-0.01em]">New incident</h1>
+              <h1 className="text-[22px] font-semibold tracking-[-0.01em]">New mission</h1>
               <p className="text-[13px] text-muted">Find the building. Floor plan and records load automatically.</p>
             </div>
             <div className="flex flex-col gap-1.5">
@@ -88,9 +88,9 @@ function NewIncidentPage() {
               </ul>
             </div>
             <div className="flex flex-col gap-2">
-              <span className="text-[13px] font-semibold">Incident type</span>
+              <span className="text-[13px] font-semibold">Mission type</span>
               <div className="flex flex-wrap gap-1.5">
-                {incidentTypes.map((t) => (
+                {missionTypes.map((t) => (
                   <button
                     key={t}
                     type="button"
@@ -108,12 +108,12 @@ function NewIncidentPage() {
             </div>
             <div className="flex flex-col gap-2">
               <div className="flex items-baseline">
-                <span className="flex-1 text-[13px] font-semibold">Recent incidents</span>
+                <span className="flex-1 text-[13px] font-semibold">Recent missions</span>
                 <span className="text-xs font-medium text-orange-edge">View all</span>
               </div>
               <ul className="flex flex-col">
-                {recentIncidents.map((r, i) => (
-                  <li key={r.id} className={cn("flex items-center gap-2.5 py-2", i < recentIncidents.length - 1 && "border-b border-line-soft")}>
+                {recentMissions.map((r, i) => (
+                  <li key={r.id} className={cn("flex items-center gap-2.5 py-2", i < recentMissions.length - 1 && "border-b border-line-soft")}>
                     <span className="flex flex-1 flex-col gap-px">
                       <span className="text-[13px] font-medium">{r.place}</span>
                       <span className="text-xs text-muted">{r.meta}</span>
