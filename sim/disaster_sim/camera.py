@@ -1,8 +1,10 @@
-"""Drone sensors. The RGB-D camera produces the only data a drone sends for mapping.
+"""The drone's camera: a cheap monocular RGB camera fixed to the nose.
 
-Frames are rendered by ray marching through the true voxel world. The drone does no
-processing on them: it streams them (with its pose) to the master. Six short
-time-of-flight rangers feed the onboard collision reflex.
+Frames are rendered by ray marching through the true voxel world, then degraded the way a
+toy-drone camera + JPEG stream degrades them: sensor gain noise (worse indoors, where auto
+exposure cranks the gain), motion blur from body rotation, chroma subsampling and
+quantization. The ESP forwards them as JPEG; the master gets RGB only. True depth rides
+along in `sim_truth` purely so the simulated depth network can model its errors.
 """
 from __future__ import annotations
 
@@ -13,15 +15,18 @@ import numpy as np
 from . import materials as M
 from .building import Building
 from .config import SimConfig
+from .packets import FramePacket
 
 STEP = 0.5  # ray-march step (m); voxels are 1 m
-RANGER_DIRS = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]], dtype=float)
-RANGER_MAX = 4.0
+EXPOSURE_S = 1 / 30
+GAIN_NOISE_OUTDOOR, GAIN_NOISE_INDOOR = 0.04, 0.09
+JPEG_STEP = 8.0
 
 
 @dataclass
 class Frame:
-    """One camera frame as transmitted: pose + depth (0 = no return) + RGB."""
+    """An observation as the master fuses it: estimated pose + estimated depth (0 = none)
+    + RGB."""
     drone: int
     t: float
     pos: np.ndarray  # (3,)
@@ -71,6 +76,8 @@ class RGBDCamera:
         self.b = building
         self.k = Intrinsics(cfg)
         self.rng = rng
+        self.hfov_deg = cfg.cam_hfov_deg
+        self.jpeg_bytes = cfg.jpeg_bytes
         # Pad the world so rays never need bounds checks: below ground is solid asphalt,
         # everywhere else outside the site is air.
         pad = int(np.ceil(cfg.cam_range)) + 2
@@ -87,7 +94,8 @@ class RGBDCamera:
         vidx = np.floor(pts).astype(np.int64)
         return self.flat[(vidx + self.pad) @ self.strides], vidx
 
-    def capture(self, drone: int, t: float, pos: np.ndarray, rot: np.ndarray, chunk: int = 6) -> Frame:
+    def capture(self, drone: int, t: float, pos: np.ndarray, rot: np.ndarray, omega: np.ndarray | None = None,
+                chunk: int = 6) -> FramePacket:
         k = self.k
         dirs = k.rays(rot)
         n = len(dirs)
@@ -123,20 +131,31 @@ class RGBDCamera:
         facing = np.abs(dirs[r, axis])
         shade = 0.8 + 0.2 * facing + np.where((axis == 2) & (dirs[:, 2] < 0), 0.05, 0.0)
 
-        noise = self.rng.normal(0.0, 0.035, size=(n, 3))
-        rgb = M.COLORS[hit_mat].astype(np.float32) * (shade[:, None] + noise)
+        rgb = M.COLORS[hit_mat].astype(np.float32) * shade[:, None]
         rgb = np.where(hit[:, None], rgb, np.array([18.0, 22.0, 30.0]))  # no return: dark
-        depth = depth + self.rng.normal(0.0, 1.0, size=n) * (0.02 + 0.01 * depth)
         depth = np.where(hit, np.maximum(depth, 0.05), 0.0)
-        return Frame(drone, t, pos.copy(), rot.copy(),
-                     depth.reshape(k.h, k.w).astype(np.float32),
-                     np.clip(rgb, 0, 255).astype(np.uint8).reshape(k.h, k.w, 3))
+        img = self._degrade(rgb.reshape(k.h, k.w, 3), self.b.inside_building(pos[None, :])[0], omega)
+        size = int(self.jpeg_bytes * self.rng.uniform(0.8, 1.2))
+        return FramePacket(drone, t, img, size,
+                           sim_truth={"pos": pos.copy(), "rot": rot.copy(),
+                                      "depth": depth.reshape(k.h, k.w).astype(np.float32)})
 
-    def rangers(self, pos: np.ndarray) -> np.ndarray:
-        """(N, 6) distances to the nearest surface along +-x, +-y, +-z (RANGER_MAX if none)."""
-        s = np.arange(0.1, RANGER_MAX, 0.1)
-        pts = pos[:, None, None, :] + RANGER_DIRS[None, :, None, :] * s[None, None, :, None]
-        solid = self._lookup(pts)[0] != M.AIR
-        first = solid.argmax(axis=2)
-        anyhit = solid.any(axis=2)
-        return np.where(anyhit, s[first], RANGER_MAX)
+    def _degrade(self, img: np.ndarray, indoors: bool, omega) -> np.ndarray:
+        """Toy-camera + JPEG artifacts on a float RGB image (H, W, 3)."""
+        h, w, _ = img.shape
+        # Motion blur: average with copies shifted by the image motion during exposure.
+        if omega is not None:
+            px_per_rad = w / np.deg2rad(self.hfov_deg)
+            dx = int(round(abs(omega[2]) * EXPOSURE_S * px_per_rad))
+            dy = int(round(abs(omega[1]) * EXPOSURE_S * px_per_rad))
+            if dx or dy:
+                img = (img + np.roll(img, (dy, dx), axis=(0, 1)) + np.roll(img, (dy // 2, dx // 2), axis=(0, 1))) / 3
+        # Sensor gain noise (auto exposure indoors raises the gain).
+        sigma = GAIN_NOISE_INDOOR if indoors else GAIN_NOISE_OUTDOOR
+        img = img * (1.0 + self.rng.normal(0.0, sigma, (h, w, 1))) + self.rng.normal(0.0, sigma * 60, (h, w, 3))
+        # JPEG: 2x2 chroma subsampling (blend toward block mean) and coarse quantization.
+        hb, wb = h - h % 2, w - w % 2
+        blk = img[:hb, :wb].reshape(hb // 2, 2, wb // 2, 2, 3).mean(axis=(1, 3))
+        img[:hb, :wb] = 0.6 * img[:hb, :wb] + 0.4 * np.repeat(np.repeat(blk, 2, 0), 2, 1)
+        img = np.round(img / JPEG_STEP) * JPEG_STEP
+        return np.clip(img, 0, 255).astype(np.uint8)

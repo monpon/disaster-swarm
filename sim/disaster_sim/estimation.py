@@ -1,0 +1,124 @@
+"""Central-node perception stand-ins: visual-inertial odometry and monocular depth.
+
+On real hardware the master runs VIO on each drone's JPEG frames + IMU batches, and a
+learned monocular depth network (scaled metrically by VIO) on each frame. Neither runs
+here; instead these classes reproduce their characteristic errors from `sim_truth`, and
+are the only code that reads it:
+
+* VIO drifts with distance flown (position random walk plus a slowly wandering heading
+  error that bends the estimated path), snaps back toward an earlier estimate when the
+  drone revisits a place (loop closure), and re-anchors near the base station, where
+  fiducials around the landing pads give absolute fixes.
+* The depth network is smooth and roughly right: per-frame scale error, blocky per-region
+  errors, a little pixel noise, smeared depth edges, and nothing trustworthy beyond
+  `depth_max` metres.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+KEYFRAME_SPACING = 3.0
+LOOP_RADIUS = 2.0
+LOOP_MIN_AGE = 30.0
+LOOP_GAIN = 0.15  # fraction of the discrepancy corrected per update while revisiting
+BASE_FIX_RADIUS = 12.0
+MAX_KEYFRAMES = 600
+
+
+def rot_z(a: float) -> np.ndarray:
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+class SimulatedVIO:
+    def __init__(self, n: int, cfg, base, rng: np.random.Generator):
+        self.n = n
+        self.rng = rng
+        self.base = np.asarray(base, dtype=float)
+        self.sigma_p = cfg.vio_drift  # m per sqrt(m) flown
+        self.sigma_yaw = cfg.vio_yaw_drift  # rad per sqrt(m) flown
+        self.err_p = np.zeros((n, 3))
+        self.err_yaw = np.zeros(n)
+        self.prev = [None] * n  # previous true position
+        # Keyframes per drone: time, true position, estimate error then (ring buffer).
+        self.kf_t = np.full((n, MAX_KEYFRAMES), -1e9)
+        self.kf_p = np.full((n, MAX_KEYFRAMES, 3), 1e9)
+        self.kf_err = np.zeros((n, MAX_KEYFRAMES, 4))
+        self.kf_n = np.zeros(n, dtype=int)
+        self.kf_last = np.full((n, 3), 1e9)
+
+    def update(self, i: int, t: float, truth: dict) -> None:
+        p = np.asarray(truth["pos"], dtype=float)
+        prev = self.prev[i]
+        self.prev[i] = p.copy()
+        if truth.get("grounded") and np.linalg.norm(p[:2] - self.base[:2]) < BASE_FIX_RADIUS + 15:
+            self.err_p[i] *= 0.0  # parked on a pad: known position
+            self.err_yaw[i] = 0.0
+            return
+        if prev is None:
+            return
+        step = p - prev
+        dist = float(np.linalg.norm(step))
+        if dist > 1e-4:
+            # Heading error bends the integrated path; noise grows with distance.
+            bent = rot_z(self.err_yaw[i]) @ step - step
+            self.err_p[i] += bent + self.rng.normal(0.0, self.sigma_p * np.sqrt(dist), 3) * [1.0, 1.0, 0.5]
+            self.err_yaw[i] += self.rng.normal(0.0, self.sigma_yaw * np.sqrt(dist))
+        # Absolute fixes near the base station (pad fiducials, known building corners).
+        d_base = np.linalg.norm(p - self.base)
+        if d_base < BASE_FIX_RADIUS:
+            self.err_p[i] *= 0.9
+            self.err_yaw[i] *= 0.9
+        # Loop closure: revisiting a keyframe pulls the estimate back to agree with it.
+        if np.linalg.norm(p - self.kf_last[i]) > KEYFRAME_SPACING:
+            k = self.kf_n[i] % MAX_KEYFRAMES
+            self.kf_t[i, k], self.kf_p[i, k] = t, p
+            self.kf_err[i, k, :3], self.kf_err[i, k, 3] = self.err_p[i], self.err_yaw[i]
+            self.kf_n[i] += 1
+            self.kf_last[i] = p
+        near = (np.einsum("ij,ij->i", self.kf_p[i] - p, self.kf_p[i] - p) < LOOP_RADIUS ** 2) \
+            & (t - self.kf_t[i] > LOOP_MIN_AGE)
+        if near.any():
+            ke = self.kf_err[i, np.flatnonzero(near)[0]]
+            self.err_p[i] += (ke[:3] - self.err_p[i]) * LOOP_GAIN
+            self.err_yaw[i] += (ke[3] - self.err_yaw[i]) * LOOP_GAIN
+
+    def pose(self, i: int, truth: dict) -> tuple[np.ndarray, np.ndarray]:
+        """Estimated (position, body-to-world rotation) for a truth pose of drone i."""
+        p = np.asarray(truth["pos"], dtype=float) + self.err_p[i]
+        rot = rot_z(self.err_yaw[i]) @ np.asarray(truth["rot"], dtype=float)
+        return p, rot
+
+    def velocity(self, i: int, truth: dict) -> np.ndarray:
+        return rot_z(self.err_yaw[i]) @ np.asarray(truth["vel"], dtype=float) + self.rng.normal(0.0, 0.05, 3)
+
+    def drift(self, i: int) -> float:
+        return float(np.linalg.norm(self.err_p[i]))
+
+
+class SimulatedDepthNet:
+    def __init__(self, cfg, rng: np.random.Generator):
+        self.rng = rng
+        self.scale_sigma = cfg.depth_scale_sigma
+        self.region_sigma = cfg.depth_region_sigma
+        self.depth_max = cfg.depth_max
+
+    def estimate(self, depth: np.ndarray) -> np.ndarray:
+        """Monocular depth estimate (H, W) for a frame whose true depth is `depth` (0 = no
+        return / sky). Returns 0 where the estimate should not be trusted."""
+        h, w = depth.shape
+        valid = depth > 0
+        d = np.where(valid, depth, 0.0)
+        # Depth networks smooth across object boundaries: blend with a 3x3 box blur.
+        pad = np.pad(np.where(valid, d, np.nan), 1, mode="edge")
+        win = np.stack([pad[y:y + h, x:x + w] for y in range(3) for x in range(3)])
+        ok = ~np.isnan(win)
+        blur = np.where(ok, win, 0.0).sum(axis=0) / np.maximum(ok.sum(axis=0), 1)
+        d = np.where(valid, 0.75 * d + 0.25 * np.nan_to_num(blur, nan=0.0), 0.0)
+        # Per-frame scale error and blocky region errors (4x4 pixel blocks).
+        scale = np.exp(self.rng.normal(0.0, self.scale_sigma))
+        bh, bw = -(-h // 4), -(-w // 4)
+        region = np.repeat(np.repeat(self.rng.normal(0.0, self.region_sigma, (bh, bw)), 4, 0), 4, 1)[:h, :w]
+        noise = self.rng.normal(0.0, 0.02, (h, w))
+        est = d * scale * (1.0 + region + noise)
+        return np.where(valid & (est > 0.1) & (est < self.depth_max), est, 0.0).astype(np.float32)

@@ -13,7 +13,7 @@
         <div class="view-tag"><b>REAL BUILDING</b><span>ground truth · drones in flight</span></div>
       </section>
       <section id="view-map" class="view">
-        <div class="view-tag map"><b>MASTER MAP</b><span id="map-stats">point cloud from camera feeds</span></div>
+        <div class="view-tag map"><b>MASTER MAP</b><span>drones at estimated pose ·</span><span id="map-stats">point cloud from camera feeds</span></div>
         <div class="legend">
           <span data-mode="texture"><i class="grad tex"></i>points back-projected from depth pixels, in the color the camera saw</span>
           <span data-mode="quality"><i class="grad qual"></i>scan quality: far → proper (≤ 8 m) → close</span>
@@ -49,6 +49,7 @@
         <div class="metric"><label>Airborne</label><span id="m-air">0</span></div>
         <div class="metric"><label>Relays</label><span id="m-relays">0</span></div>
         <div class="metric"><label>Lost</label><span id="m-lost">0</span></div>
+        <div class="metric"><label>VIO drift</label><span id="m-drift">-</span></div>
         <div class="metric wide"><label>Uplink</label><span id="m-link">-</span></div>
         <div class="metric wide"><label>Sim rate</label><span id="m-rtf">-</span></div>
       </div>
@@ -58,7 +59,7 @@
       <section class="panel">
         <h2>Fleet</h2>
         <table id="fleet">
-          <thead><tr><th>ID</th><th>Mode</th><th>Battery</th><th class="num">Mbps</th><th class="num">Queue</th></tr></thead>
+          <thead><tr><th>ID</th><th>Mode</th><th>Battery</th><th class="num">Mbps</th><th class="num" title="VIO position error (m)">Drift</th></tr></thead>
           <tbody id="fleet-body"></tbody>
         </table>
       </section>

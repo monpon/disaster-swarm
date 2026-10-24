@@ -79,9 +79,11 @@ export interface DroneState {
   mode: Mode;
   crashed: boolean;
   grounded: boolean;
-  avoiding: boolean;
-  returning: boolean;
-  frozen: boolean; // lost link: holding position until a relay reaches it
+  frozen: boolean; // ESP failsafe: lost the command link, sticks centered, holding on optical flow
+  landing_auto: boolean; // battery nearly flat: stock firmware landing in place
+  ep: Vec3; // master's VIO estimate of the position
+  eq: [number, number, number, number]; // master's estimate of the attitude
+  drift: number; // |estimate - truth| (m), for display only
   link: number; // Mbps end-to-end
   hops: number;
   route: number[]; // node ids from this drone to the base (-1)
@@ -110,6 +112,7 @@ export interface Metrics {
   radio_mb: number;
   mapped_voxels: number;
   wind: [number, number];
+  drift: number; // mean VIO position error of airborne drones (m)
   running: boolean;
   speed: number;
   rtf: number;
@@ -199,6 +202,7 @@ export interface FeedMessage {
   depth?: string;
   frames?: [number, number];
   backlog?: number;
+  jpeg_kb?: number;
 }
 
 export type ServerMessage = WorldMessage | StateMessage | SnapshotMessage | FeedMessage;

@@ -92,11 +92,13 @@ def state_message(sim: Simulation, stream: MapStream, since_event: int, extra: d
 
 
 def feed_message(sim: Simulation, drone: int) -> dict | None:
-    """The latest camera frame the master received from `drone` (what the master sees)."""
+    """The latest JPEG frame the master received from `drone`, and the depth its monocular
+    depth network estimated for it (what the master actually works from)."""
     f = sim.last_frames[drone] if 0 <= drone < len(sim.last_frames) else None
-    if f is None:
+    est = sim.master.last_depth[drone] if 0 <= drone < len(sim.master.last_depth) else None
+    if f is None or est is None:
         return {"type": "feed", "drone": drone, "t": None}
-    depth = np.where(f.depth > 0, np.clip(255 - f.depth / sim.cfg.cam_range * 255, 1, 255), 0)
+    depth = np.where(est > 0, np.clip(255 - est / sim.cfg.depth_max * 255, 1, 255), 0)
     return {
         "type": "feed",
         "drone": drone,
@@ -108,4 +110,5 @@ def feed_message(sim: Simulation, drone: int) -> dict | None:
         "depth": b64(depth, "u1"),
         "frames": [int(v) for v in sim.radio.frame_stats[drone]],
         "backlog": len(sim.backlog[drone]),
+        "jpeg_kb": round(f.nbytes / 1000, 1),
     }

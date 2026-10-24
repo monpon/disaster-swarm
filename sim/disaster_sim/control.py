@@ -1,4 +1,10 @@
-"""Cascaded flight controller: position -> velocity -> attitude -> body rate -> motors."""
+"""The drone's stock flight controller: velocity -> attitude -> body rate -> motors.
+
+Like the optical-flow toy drones it models, it flies velocity-style sticks: it tracks a
+commanded velocity using its own downward optical-flow velocity estimate (which carries a
+slowly wandering bias, so a "hovering" drone drifts a little) and its barometric climb rate,
+and holds the heading set by integrating the yaw-rate stick. It has no notion of position.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -12,7 +18,6 @@ MAX_YAW_STEP = 1.0  # rad
 class FlightController:
     def __init__(self, n: int, max_speed: float = 8.0):
         self.n = n
-        self.kp_pos = np.array([1.0, 1.0, 1.4])
         self.kp_vel = np.array([2.6, 2.6, 4.0])
         self.ki_vel = np.array([0.6, 0.6, 1.2])
         self.kp_att = np.array([8.0, 8.0, 3.0])
@@ -23,7 +28,8 @@ class FlightController:
         self.max_rate = np.array([4.0, 4.0, 1.5])
         self.vel_int = np.zeros((n, 3))
 
-        self.pos_sp = np.zeros((n, 3))
+        self.vel_sp = np.zeros((n, 3))  # world-frame velocity setpoint (from the sticks)
+        self.vel_meas = np.zeros((n, 3))  # the drone's own (flow + baro) velocity estimate
         self.yaw_sp = np.zeros(n)
         self.speed_limit = np.full(n, max_speed)
         self.armed = np.zeros(n, dtype=bool)
@@ -32,10 +38,10 @@ class FlightController:
         self.vel_int[mask] = 0.0
 
     def update(self, fleet, dt: float) -> None:
-        pos, vel, R, omega = fleet.pos, fleet.vel, fleet.rot, fleet.omega
+        R, omega = fleet.rot, fleet.omega
 
-        # Position loop -> velocity setpoint with separate horizontal/vertical limits.
-        v_sp = self.kp_pos * (self.pos_sp - pos)
+        # Stick velocity setpoint with separate horizontal/vertical limits.
+        v_sp = self.vel_sp.copy()
         vh = np.hypot(v_sp[:, 0], v_sp[:, 1])
         lim = np.minimum(self.speed_limit, self.max_speed_h)
         scale = np.where(vh > lim, lim / np.maximum(vh, 1e-9), 1.0)
@@ -43,7 +49,7 @@ class FlightController:
         v_sp[:, 2] = np.clip(v_sp[:, 2], -self.max_speed_down, self.max_speed_up)
 
         # Velocity loop -> desired acceleration (PI, anti-windup by clamping).
-        err = v_sp - vel
+        err = v_sp - self.vel_meas
         self.vel_int = np.clip(self.vel_int + err * dt, -3.0, 3.0)
         self.vel_int[fleet.grounded] = 0.0
         a_sp = self.kp_vel * err + self.ki_vel * self.vel_int

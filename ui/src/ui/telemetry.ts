@@ -44,6 +44,7 @@ export class Telemetry {
     $("m-lost").textContent = String(m.crashed);
     $("m-lost").parentElement!.classList.toggle("alert", m.crashed > 0);
     const tot = m.frames_ok + m.frames_dropped;
+    $("m-drift").textContent = `${m.drift.toFixed(2)} m`;
     $("m-link").textContent = `${m.radio_mb.toFixed(0)} MB · ${tot ? ((m.frames_dropped / tot) * 100).toFixed(1) : "0.0"}% lost`;
     $("m-rtf").textContent = m.running ? `${m.rtf.toFixed(1)}× (set ${m.speed}×)` : "paused";
     const done = m.phase === "complete";
@@ -77,7 +78,9 @@ export class Telemetry {
       const lnk = row.querySelector(".lnk") as HTMLElement;
       lnk.textContent = d.grounded ? "—" : d.link > 0 ? `${d.link.toFixed(1)}${d.hops > 1 ? `·${d.hops}h` : ""}` : "LOST";
       lnk.style.color = d.grounded ? "" : linkColor(d.link);
-      (row.querySelector(".bk") as HTMLElement).textContent = d.backlog ? String(d.backlog) : "";
+      const bk = row.querySelector(".bk") as HTMLElement;
+      bk.textContent = d.grounded ? "" : d.drift.toFixed(1);
+      bk.style.color = d.drift > 1.5 ? "#ff8c42" : "";
     }
     for (const [id, row] of this.rows) {
       if (!list.some((d) => d.id === id)) {
@@ -101,9 +104,8 @@ export class Telemetry {
     const color = MODE_COLORS[d.mode];
     const speed = Math.hypot(...d.v);
     const flags = [
-      d.avoiding ? "ToF reflex" : "",
-      d.frozen ? "link lost: frozen, awaiting relay" : "",
-      d.returning ? "low battery: retracing trail" : "",
+      d.frozen ? "link lost: ESP failsafe hover, awaiting relay" : "",
+      d.landing_auto ? "battery flat: auto-landing" : "",
       d.serves !== null ? `relaying D${d.serves}` : "",
       d.crashed ? "CRASHED" : "",
     ]
@@ -120,12 +122,13 @@ export class Telemetry {
       <div class="flags">${flags}</div>
       <div class="batt-big"><div style="width:${d.soc * 100}%;background:${battColor(d.soc)}"></div><span>${(d.soc * 100).toFixed(0)}%</span></div>
       <dl>
-        <dt>Position</dt><dd>${d.p[0].toFixed(1)}, ${d.p[1].toFixed(1)}, ${d.p[2].toFixed(1)}</dd>
+        <dt>Position</dt><dd>${d.p[0].toFixed(1)}, ${d.p[1].toFixed(1)}, ${d.p[2].toFixed(1)} <small>(true)</small></dd>
+        <dt>Estimate</dt><dd>${d.ep[0].toFixed(1)}, ${d.ep[1].toFixed(1)}, ${d.ep[2].toFixed(1)} <small>VIO · drift ${d.drift.toFixed(2)} m</small></dd>
         <dt>Speed</dt><dd>${speed.toFixed(1)} m/s · ${d.power.toFixed(0)} W</dd>
         <dt>Camera</dt><dd>nose-fixed · ${((yawOf(d.q) * 180) / Math.PI).toFixed(0)}° hdg</dd>
         <dt>Link</dt><dd style="color:${linkColor(d.link)}">${d.link > 0 ? `${d.link.toFixed(2)} Mbps` : "disconnected"}</dd>
         <dt>Route</dt><dd>${route}</dd>
-        <dt>Frames</dt><dd>${d.frames[0]} sent · ${d.frames[1]} lost · ${d.backlog} queued</dd>
+        <dt>Frames</dt><dd>${d.frames[0]} sent · ${d.frames[1]} lost · ${d.backlog} queued on ESP</dd>
         <dt>Waypoints</dt><dd>${d.path.length}</dd>
       </dl>`;
   }

@@ -123,7 +123,8 @@ function applyView(v: ViewSettings): void {
 
 function applyState(msg: StateMessage | SnapshotMessage): void {
   swarmReal.sync(msg.drones);
-  swarmMap.sync(msg.drones);
+  // The map view shows where the master believes each drone is (its VIO estimate).
+  swarmMap.sync(msg.drones.map((d) => ({ ...d, p: d.ep, q: d.eq })));
   mapView.setClock(msg.metrics.t, msg.metrics.running, msg.metrics.rtf);
   mapView.applyDeltas(msg.map);
   if (msg.seen) mapView.applySeen(msg.seen);

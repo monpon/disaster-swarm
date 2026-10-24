@@ -1,4 +1,5 @@
-"""Simulation: drones (physics, autopilot, camera) <-> radio <-> central master."""
+"""Simulation: drones (physics, stock flight controller, camera, ESP32) <-> ESP mesh <->
+central node (perception, planning, piloting)."""
 from __future__ import annotations
 
 from collections import deque
@@ -6,12 +7,13 @@ from collections import deque
 import numpy as np
 
 from . import materials as M
-from .autopilot import Autopilot
 from .building import generate_building
 from .camera import RGBDCamera
 from .config import SimConfig
 from .control import FlightController
+from .esp import EspFleet
 from .master import MasterController
+from .packets import ImuPacket
 from .physics import F_MAX, QuadrotorFleet
 from .radio import Radio
 
@@ -34,13 +36,11 @@ class Simulation:
         start = np.column_stack([self.pads, np.ones(n)])
         self.fleet = QuadrotorFleet(n, start, yaw=np.zeros(n), battery_wh=cfg.battery_wh)
         self.fc = FlightController(n, max_speed=cfg.max_speed)
-        self.fc.pos_sp[:] = start
-        self.autopilots = [Autopilot(i, cfg.max_speed) for i in range(n)]
+        self.esp = EspFleet(n, self.rng)
         self.camera = RGBDCamera(self.b, cfg, self.rng)
         self.radio = Radio(self.b, cfg, self.rng)
         self.master = MasterController(cfg, self.b.vox.shape, (self.b.x0, self.b.y0, self.b.x1, self.b.y1, self.b.top),
-                                       self.pads, self.b.base)
-        self.rangers = np.full((n, 6), 2.5)
+                                       self.pads, self.b.base, np.random.default_rng(cfg.seed + 2000))
         self.last_frames: list = [None] * n  # most recent frame the master received per drone
         self.backlog = [deque() for _ in range(n)]  # frames waiting for radio capacity
 
@@ -64,25 +64,26 @@ class Simulation:
 
         if self._every(cfg.master_hz):
             self.radio.update(f.pos, ~f.crashed)
-            for i, ap in enumerate(self.autopilots):
-                ap.set_link(self.radio.routes[i].connected, self.t)
-            for drone, cmd in self.master.step(self.t):
-                self.radio.send_down(self.t, drone, cmd)
+            self.master.step(self.t)
         self.radio.tick(dt)
 
         for direction, drone, msg in self.radio.receive(self.t):
             if direction == "down":
-                self.autopilots[drone].on_command(msg)
-            elif isinstance(msg, dict):
+                self.esp.on_command(msg, self.t)
+            elif isinstance(msg, ImuPacket):
                 self.master.on_telemetry(msg, self.t)
             else:
                 self.master.on_frame(msg, self.t)
                 self.last_frames[drone] = msg
 
+        if self._every(cfg.telemetry_hz):
+            for pkt in self.esp.packets(f, self.t, dt, self.radio.routes):
+                self.radio.send_up(self.t, pkt.drone, pkt, pkt.nbytes)
+            for drone, cmd in self.master.control(self.t):
+                self.radio.send_down(self.t, drone, cmd, cmd.nbytes)
+
         if self._every(cfg.autopilot_hz):
-            self.rangers = self.camera.rangers(f.pos)
-            for ap in self.autopilots:
-                ap.update(f, self.fc, self.rangers[ap.i], self.t)
+            self.esp.apply(f, self.fc, self.t, 1.0 / cfg.autopilot_hz)
             self._charge(1.0 / cfg.autopilot_hz)
 
         if self._every(cfg.camera_hz):
@@ -90,7 +91,7 @@ class Simulation:
                 if f.crashed[i] or f.grounded[i]:
                     continue
                 q = self.backlog[i]
-                q.append(self.camera.capture(i, self.t, f.pos[i], f.rot[i]))
+                q.append(self.camera.capture(i, self.t, f.pos[i], f.rot[i], f.omega[i]))
                 if len(q) > FRAME_BUFFER:
                     q.popleft()  # onboard buffer full: oldest frame is lost
                     self.radio.frame_stats[i, 1] += 1
@@ -98,16 +99,10 @@ class Simulation:
                 while q and self.radio.send_frame(self.t, i, q[0], q[0].nbytes):
                     q.popleft()
 
-        if self._every(cfg.telemetry_hz):
-            for i in range(f.n):
-                r = self.radio.routes[i]
-                self.radio.send_up(self.t, i, {
-                    "drone": i, "t": self.t, "pos": f.pos[i].copy(), "vel": f.vel[i].copy(),
-                    "soc": float(f.soc[i]), "grounded": bool(f.grounded[i]), "crashed": bool(f.crashed[i]),
-                    "link_cap": r.capacity, "hops": r.hops})
-
+        self.fc.vel_meas = self.esp.flow_velocity(f)
         self.fc.update(f, dt)
         f.step(dt, wind, self.b)
+        self.esp.sample(f, dt)
         self.tick += 1
         self.t += dt
         if self._every(1):
@@ -178,6 +173,8 @@ class Simulation:
             "radio_mb": round(self.radio.stats["bytes"] / 1e6, 2),
             "mapped_voxels": int(self.master.map.occupied.sum()),
             "wind": [round(float(v), 2) for v in (self.wind_mean + self.gust)[:2]],
+            "drift": round(float(np.mean([self.master.vio.drift(i) for i in range(f.n)
+                                          if not f.grounded[i] and not f.crashed[i]] or [0.0])), 2),
         }
 
     def radio_mesh(self) -> list[list]:
@@ -193,7 +190,7 @@ class Simulation:
         out = []
         for i in range(f.n):
             r = self.master.drones[i]
-            ap = self.autopilots[i]
+            wp = self.master.pilot.target_index(i)
             route = self.radio.routes[i]
             out.append({
                 "id": i,
@@ -206,15 +203,26 @@ class Simulation:
                 "mode": r.mode,
                 "crashed": bool(f.crashed[i]),
                 "grounded": bool(f.grounded[i]),
-                "avoiding": ap.avoiding,
-                "returning": ap.returning,
-                "frozen": ap.frozen,
+                "frozen": bool(self.esp.failsafe[i]),
+                "landing_auto": bool(self.esp.auto_land[i]),
+                # What the master believes (VIO estimate): where the map view draws it.
+                "ep": [round(float(v), 3) for v in r.pos],
+                "eq": [round(float(v), 4) for v in _yaw_corrected_quat(f.quat[i], self.master.vio.err_yaw[i])],
+                "drift": round(self.master.vio.drift(i), 2),
                 "link": round(route.capacity / 1e6, 2),
                 "hops": route.hops,
                 "route": [int(v) for v in route.path],
                 "frames": [int(v) for v in self.radio.frame_stats[i]],
                 "backlog": len(self.backlog[i]),
-                "path": [[round(v, 2) for v in p] for p in ap.cmd.path[ap.wp:]] if ap.cmd.kind == "path" else [],
+                "path": [[round(float(v), 2) for v in p] for p in r.path[wp:wp + 40]] if r.path else [],
                 "serves": None if r.serves is None else int(r.serves),
             })
         return out
+
+
+def _yaw_corrected_quat(q: np.ndarray, dyaw: float) -> np.ndarray:
+    """Quaternion (w, x, y, z) rotated by dyaw about world z: the attitude the master
+    believes the drone has when its VIO heading is off by dyaw."""
+    c, s = np.cos(dyaw / 2), np.sin(dyaw / 2)
+    w, x, y, z = q
+    return np.array([c * w - s * z, c * x - s * y, c * y + s * x, c * z + s * w])

@@ -41,7 +41,8 @@ export class FeedPanel {
       g.putImageData(img, 0, 0);
     }
     const age = m.age ?? 0;
-    this.info.innerHTML = `${w}×${h} RGB-D · frame age <b class="${age > 2 ? "bad" : ""}">${age.toFixed(1)} s</b> · ` +
-      `${m.frames?.[0] ?? 0} recv · ${m.frames?.[1] ?? 0} lost · ${m.backlog ?? 0} queued onboard`;
+    this.info.innerHTML = `${w}×${h} mono · frame age <b class="${age > 2 ? "bad" : ""}">${age.toFixed(1)} s</b> · ` +
+      `${m.jpeg_kb ?? "?"} kB JPEG · ${m.frames?.[0] ?? 0} recv · ${m.frames?.[1] ?? 0} lost · ${m.backlog ?? 0} queued on ESP<br>` +
+      `left: camera as received · right: master's monocular depth estimate`;
   }
 }

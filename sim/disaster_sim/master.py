@@ -1,8 +1,11 @@
 """Central master computer: all perception and decision making happens here.
 
-Inputs are only what arrives over the radio: camera frames (fused into the voxel map)
-and small telemetry packets. Outputs are waypoint commands. The master never reads
-ground truth; it knows only the building's rough outline (operator input).
+Inputs are only what the drones' ESP32 modules send over the mesh: JPEG camera frames and
+IMU batches (`packets.py`). The master estimates every drone's pose (visual-inertial
+odometry) and per-pixel depth (monocular depth network) itself, fuses the frames into its
+map, plans, and pilots each drone with stick commands. It knows only the building's rough
+outline (operator input). The VIO and depth network are simulated stand-ins
+(`estimation.py`); they are the only code allowed to read the packets' `sim_truth`.
 
 Mission phases:
   survey   -> drones circle the building and sweep the roof, looking for openings
@@ -17,8 +20,10 @@ import numpy as np
 from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
 
-from .autopilot import Command
 from .camera import Frame
+from .estimation import SimulatedDepthNet, SimulatedVIO
+from .packets import FramePacket, ImuPacket, StickCommand
+from .pilot import Pilot
 from .config import SimConfig
 from .planner3d import NavGrid, to_waypoints
 from .radio import NOISE_DBM, SLAB_DB, TX_DBM, WALL_DB, capacity_for, path_loss_db
@@ -30,11 +35,9 @@ IDLE, TAKEOFF, SURVEY, WAIT, ENTER, EXPLORE, INVESTIGATE, RELAY, RTB, LANDING, C
 WORKING = (SURVEY, ENTER, EXPLORE, INVESTIGATE, RELAY, WAIT)
 
 CRUISE_POWER_W = 175.0
-RESEND_PERIOD = 2.0
 LOST_AFTER = 3.0
 LOOK_TIME = 1.5
 TILE = 4
-FRAME_NEED_BPS = 4.0e5  # what a camera stream needs to get through
 RELAY_TARGET_BPS = 2.0e6
 SURVEY_STANDOFF = 8.0
 ASSOC_RADIUS = 2.0
@@ -42,6 +45,7 @@ CONFIRM_DETECTIONS = 3
 CONFIRM_RANGE = 6.0
 INVESTIGATE_TIMEOUT = 40.0
 MAX_PLANS_PER_TICK = 4
+OUTDOOR_MARGIN = 3
 RELAY_SETTLE_S = 10.0  # a relay on station this long without restoring contact -> chain another
 
 _SIX = ndimage.generate_binary_structure(3, 1)
@@ -69,11 +73,11 @@ class DroneRecord:
     candidate: int | None = None
     entry: int | None = None
     serves: int | None = None  # relay: the drone it keeps connected
+    yaw: float = 0.0
+    frozen: bool = False  # ESP reports neutral-stick failsafe (lost the command link)
     link_cap: float = 0.0
     hops: int = 0
     trail: list = field(default_factory=list)
-    sent: tuple | None = None
-    sent_t: float = -1e9
     survey_done: bool = False
 
 
@@ -111,7 +115,7 @@ class Candidate:
 
 
 class MasterController:
-    def __init__(self, cfg: SimConfig, shape, outline, pads: np.ndarray, base):
+    def __init__(self, cfg: SimConfig, shape, outline, pads: np.ndarray, base, rng: np.random.Generator):
         self.cfg = cfg
         self.map = VoxelMap(shape, cfg)
         self.shape = tuple(shape)
@@ -133,7 +137,10 @@ class MasterController:
         self.interior = np.zeros(self.shape, dtype=bool)
         self.interior[self.x0 + 1:self.x1 - 1, self.y0 + 1:self.y1 - 1, 1:self.top] = True
         outdoor = np.ones(self.shape, dtype=bool)
-        outdoor[max(self.x0 - 1, 0):self.x1 + 1, max(self.y0 - 1, 0):self.y1 + 1, :self.top + 2] = False
+        # Outdoor flight keeps OUTDOOR_MARGIN from the building: the pilot flies on VIO estimates
+        # that can be a metre or more off.
+        m_ = OUTDOOR_MARGIN
+        outdoor[max(self.x0 - m_, 0):self.x1 + m_, max(self.y0 - m_, 0):self.y1 + m_, :self.top + m_] = False
         outdoor[:, :, 0] = False
         outdoor[:, :, sz - 2:] = False
         self.outdoor = outdoor
@@ -142,9 +149,21 @@ class MasterController:
         # target must sit within this elevation of the vantage point to be seen.
         self.half_vfov = np.deg2rad(cfg.cam_vfov_deg / 2 - 6.0)
         self.survey_legs = self._plan_survey()
+        n = len(pads)
+        self.vio = SimulatedVIO(n, cfg, base, rng)
+        self.depthnet = SimulatedDepthNet(cfg, rng)
+        self.pilot = Pilot(n, cfg.max_speed)
+        self.last_depth: list = [None] * n  # latest depth-network output per drone (for the viewer)
+        self.frame_need = 1.1 * cfg.camera_hz * cfg.jpeg_bytes * 8  # bits/s a camera stream needs
 
     # ------------------------------------------------------------------ inputs
-    def on_frame(self, f: Frame, t: float) -> None:
+    def on_frame(self, pkt: FramePacket, t: float) -> None:
+        """Estimate pose (VIO) and depth (mono depth net) for a received frame, then fuse it."""
+        i = pkt.drone
+        pos, rot = self.vio.pose(i, pkt.sim_truth)
+        depth = self.depthnet.estimate(pkt.sim_truth["depth"])
+        self.last_depth[i] = depth
+        f = Frame(i, pkt.t, pos, rot, depth, pkt.rgb)
         det = self.map.integrate(f, self.tick)
         pts, dist = det["survivor_pts"], det["survivor_dist"]
         used = np.zeros(len(pts), dtype=bool)
@@ -155,19 +174,22 @@ class MasterController:
             used |= near
             self._associate(pts[near].mean(axis=0), float(dist[near].min()), f.drone, t)
 
-    def on_telemetry(self, m: dict, t: float) -> None:
-        r = self.drones[m["drone"]]
-        if m["t"] < r.last_seen:
+    def on_telemetry(self, m: ImuPacket, t: float) -> None:
+        r = self.drones[m.drone]
+        if m.t < r.last_seen:
             return
-        if self.lost(r, t) and not m["crashed"]:
+        if self.lost(r, t) and not m.crashed:
             self._reconnected(r, t)
-        r.pos, r.vel, r.soc = np.asarray(m["pos"]), np.asarray(m["vel"]), m["soc"]
-        r.grounded, r.last_seen = m["grounded"], m["t"]
-        r.link_cap, r.hops = m["link_cap"], m["hops"]
+        self.vio.update(m.drone, m.t, m.sim_truth)
+        r.pos, rot = self.vio.pose(m.drone, m.sim_truth)
+        r.vel = self.vio.velocity(m.drone, m.sim_truth)
+        r.yaw = float(np.arctan2(rot[1, 0], rot[0, 0]))
+        r.soc, r.grounded, r.last_seen, r.frozen = m.battery, m.grounded, m.t, m.failsafe
+        r.link_cap, r.hops = m.link_bps, m.hops
         if not r.trail or np.linalg.norm(r.trail[-1] - r.pos) > 2.0:
             r.trail.append(r.pos.copy())
             r.trail = r.trail[-300:]
-        if m["crashed"] and not r.crashed:
+        if m.crashed and not r.crashed:
             r.crashed = True
             self._set_mode(r, CRASHED, t)
             self._release(r)
@@ -188,7 +210,7 @@ class MasterController:
         self._event(t, f"Drone {drone} feed: possible survivor at ({p[0]:.0f}, {p[1]:.0f}, {p[2]:.0f})", "info")
 
     # ---------------------------------------------------------------- planning
-    def step(self, t: float) -> list[tuple[int, Command]]:
+    def step(self, t: float) -> None:
         self.tick += 1
         self._build_nav()
         self._detect_entries(t)
@@ -200,7 +222,16 @@ class MasterController:
             self._allocate(t)
             self._plan_relays(t)
         self._check_paths(t)
-        return self._emit(t)
+
+    def control(self, t: float) -> list[tuple[int, StickCommand]]:
+        """Stick commands for every drone the master can still reach (run at telemetry rate)."""
+        out = []
+        for r in self.drones:
+            if r.crashed or self.lost(r, t) or r.last_seen < 0:
+                continue
+            idle = r.mode in (IDLE, CHARGING) or (r.mode == LANDING and r.grounded)
+            out.append((r.id, self.pilot.command(r, idle, r.mode == LANDING)))
+        return out
 
     def _build_nav(self) -> None:
         m = self.map
@@ -694,7 +725,7 @@ class MasterController:
         for r in self.drones:
             if r.mode not in (EXPLORE, INVESTIGATE) or r.id in served or len(r.trail) < 3 or self.lost(r, t):
                 continue
-            if r.link_cap >= FRAME_NEED_BPS:
+            if r.link_cap >= self.frame_need:
                 continue
             if self._post_relay(r, relays, t, rescue=False):
                 return
@@ -756,27 +787,6 @@ class MasterController:
                 break
 
     # ---------------------------------------------------------------- downlink
-    def _emit(self, t: float) -> list[tuple[int, Command]]:
-        out = []
-        for r in self.drones:
-            if r.mode == CRASHED:
-                continue
-            if r.mode in (IDLE, CHARGING):
-                desired, make = ("idle",), (lambda seq: Command(seq, "idle"))
-            elif r.mode == LANDING:
-                desired, make = ("land", r.pad), (lambda seq, r=r: Command(seq, "land", pad=r.pad))
-            elif r.path:
-                desired = ("path", tuple(r.path), tuple(r.yaws or ()), r.speed)
-                make = lambda seq, r=r: Command(seq, "path", list(r.path), r.yaws, r.speed,
-                                                keep_on_loss=r.mode == RTB)
-            else:
-                desired, make = ("hold",), (lambda seq: Command(seq, "hold"))
-            if desired != r.sent or t - r.sent_t > RESEND_PERIOD:
-                self.seq += 1
-                out.append((r.id, make(self.seq)))
-                r.sent, r.sent_t = desired, t
-        return out
-
     # ----------------------------------------------------------------- helpers
     def _takeoff(self, r: DroneRecord, t: float) -> None:
         self._set_mode(r, TAKEOFF, t)

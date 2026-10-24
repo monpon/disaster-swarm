@@ -1,10 +1,11 @@
-"""Indoor radio: walls and slabs attenuate links; drones relay for each other.
+"""Indoor ESP mesh: walls and slabs attenuate links; ESPs relay for each other.
 
-Every node (the master's base station and each drone) can talk to every other node with a
-capacity set by its signal-to-noise ratio. Each drone reaches the base over the widest
-(maximum-bottleneck) route, and drones sharing a hop split its capacity. Camera frames
-that don't fit the drone's share are dropped; messages wait one latency per hop plus
-serialization time.
+Every node (the central node's base radio, the mesh root, and each drone's ESP32) can talk
+to every other node with a capacity set by its signal-to-noise ratio, at ESP32 WiFi rates.
+Each drone reaches the base over the widest (maximum-bottleneck) route; drones sharing a hop
+split its capacity, and because every hop retransmits on the same channel, a stream's
+throughput is divided by its hop count. Camera frames that don't fit the drone's share
+wait in the ESP's buffer; messages take one latency per hop plus serialization time.
 """
 from __future__ import annotations
 
@@ -25,8 +26,8 @@ SLAB_DB = 15.0
 GLASS_DB = 2.0
 THICK_DB_PER_M = 3.0
 GROUND_DB = 60.0
-# (min SNR dB, capacity bits/s)
-TIERS = [(30.0, 20e6), (20.0, 8e6), (12.0, 2e6), (6.0, 5e5), (2.0, 1e5)]
+# (min SNR dB, capacity bits/s): practical ESP32 802.11n throughput by link quality
+TIERS = [(30.0, 8e6), (20.0, 4e6), (12.0, 1.5e6), (6.0, 5e5), (2.0, 1e5)]
 
 
 def capacity_for(snr: np.ndarray) -> np.ndarray:
@@ -148,7 +149,7 @@ class Radio:
             if p is None or not alive[i]:
                 self.routes[i] = Route()
                 continue
-            share = min(cap[a, b] / load[(a, b)] for a, b in p)
+            share = min(cap[a, b] / load[(a, b)] for a, b in p) / max(len(p), 1)  # shared channel
             node_path = []
             u = i + 1
             while u > 0:

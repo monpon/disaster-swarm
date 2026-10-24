@@ -63,6 +63,7 @@ class VoxelMap:
         self.stamp = np.full(n, -1, dtype=np.int64)  # last change visible to the viewer
         self.k = Intrinsics(cfg)
         self.q = ScanQuality(cfg.scan_near, cfg.cam_range, cfg.proper_scan_range)
+        self.carve_max = min(cfg.depth_max, cfg.cam_range)
         self.frames = 0
         # Colored point cloud back-projected from depth pixels (what the viewer renders).
         self.pcell = np.array([int(np.ceil(d / POINT_CELL)) for d in shape])
@@ -133,7 +134,9 @@ class VoxelMap:
         depth = f.depth.reshape(-1).astype(np.float64)
         rgb = f.rgb.reshape(-1, 3).astype(np.float32)
         hit = depth > 0
-        reach = np.where(hit, depth - 0.6, k.range)  # carve up to just before the surface
+        # Carve up to just before the surface; pixels without a trusted depth only out to
+        # the depth network's reliable range.
+        reach = np.where(hit, depth - 0.6, self.carve_max)
 
         ri, si = np.nonzero(k.steps[None, :] < reach[:, None])  # only samples before each hit
         flat, inside = self.flat_of(f.pos[None, :] + dirs[ri] * k.steps[si][:, None])
@@ -178,7 +181,9 @@ class VoxelMap:
         self._add_points(f.pos[None, :] + dirs[hit][surf] * depth[hit][surf][:, None], rgb[hit][surf])
 
         # Survivor detection: pixels whose color reads as a person's heat signature.
-        surv = (hit_rgb[:, 0] > 190) & (hit_rgb[:, 1] < 90) & (hit_rgb[:, 2] < 110)
+        # (ratios, not absolute levels: robust to the camera's gain noise and exposure)
+        r_ = hit_rgb[:, 0]
+        surv = (r_ > 150) & (hit_rgb[:, 1] < 0.33 * r_) & (hit_rgb[:, 2] < 0.45 * r_)
         return {"survivor_pts": hp[inside][surv], "survivor_dist": hit_d[surv]}
 
     # ---------------------------------------------------------------- streaming

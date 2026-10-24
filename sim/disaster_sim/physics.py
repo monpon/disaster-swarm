@@ -98,6 +98,7 @@ class QuadrotorFleet:
         self.grounded = np.ones(n, dtype=bool)
         self.power = np.zeros(n)
         self.prev_pos = self.pos.copy()
+        self.acc = np.zeros((n, 3))
         self.rot = quat_to_rot(self.quat)  # cached, refreshed whenever quat changes
 
     @property
@@ -127,6 +128,7 @@ class QuadrotorFleet:
         acc[resting] = 0.0
         domega[resting] = 0.0
 
+        self.acc = acc
         self.prev_pos = self.pos.copy()
         self.vel += acc * dt
         self.pos += self.vel * dt
