@@ -35,7 +35,7 @@ from .planner3d import NavGrid, to_waypoints
 from .smoothing import Smoother
 from .surface import Surface
 from .radio import NOISE_DBM, SLAB_DB, TX_DBM, WALL_DB, capacity_for, path_loss_db
-from .voxelmap import FREE_T, VoxelMap
+from .voxelmap import FREE_T, OCC_T, VoxelMap
 
 IDLE, TAKEOFF, SURVEY, WAIT, ENTER, EXPLORE, INVESTIGATE, RELAY, RTB, LANDING, CHARGING, CRASHED = (
     "idle", "takeoff", "survey", "wait", "enter", "explore", "investigate", "relay", "rtb", "landing",
@@ -277,6 +277,9 @@ class MasterController:
         outdoor[:, :, 0] = False
         outdoor[:, :, sz - 2:] = False
         self.interior, self.outdoor = interior, outdoor
+        if outline is not None and getattr(self, "surface", None) is not None and self.surface.available:
+            # the outer walls and roof are assumed flat and square: the mesh snaps to these planes
+            self.surface.set_planes([self.x0, self.x1], [self.y0, self.y1], [self.top + 1.0])
         self.map.sparse2d = outdoor[:, :, 1].copy()
 
     def _seed_launch_area(self, pads: np.ndarray) -> None:
@@ -618,13 +621,15 @@ class MasterController:
         v = DECEL * (-LATENCY_S + np.sqrt(LATENCY_S ** 2 + 2.0 * (clear - CLEAR_MARGIN) / DECEL))
         return float(min(v, V_GOV_MAX))
 
-    def _map_clear(self, r: DroneRecord, d: np.ndarray) -> float:
+    def _map_clear(self, r: DroneRecord, d: np.ndarray, unknown_blocks: bool = True) -> float:
         """Distance along unit direction d through cells the map has seen free (cells the drone
-        itself flew through count as free); stops at the first occupied or unknown cell."""
+        itself flew through count as free); stops at the first occupied cell, and at the first
+        unknown cell too unless `unknown_blocks` is off (then fresh frames are the evidence)."""
         steps = np.arange(0.5, 12.5, 0.5)
         pts = r.pos[None, :] + d[None, :] * steps[:, None]
         flat, inside = self.map.flat_of(pts)
-        free = (self.map.lo[flat] <= FREE_T) & inside
+        lo = self.map.lo[flat]
+        free = ((lo <= FREE_T) if unknown_blocks else (lo < OCC_T)) & inside
         if r.trail:
             tr = np.asarray(r.trail[-40:])
             free |= (np.linalg.norm(pts[:, None, :] - tr[None, :, :], axis=2).min(axis=1) < 1.2) & inside
@@ -645,14 +650,22 @@ class MasterController:
         if sp < 0.05:
             return cmd
         d = v / sp
-        clear = self._map_clear(r, d)
         hor = float(np.hypot(d[0], d[1]))
         aligned = hor < 0.3 or float(d[0] * c + d[1] * s_) / max(hor, 1e-6) > 0.8
         age = t - r.fresh_t
-        cap = None
-        if aligned and hor >= 0.3:
-            clear = min(clear, r.fresh_clear)  # what this drone's own camera shows ahead
+        fresh = age < 0.8
+        if aligned and fresh:
+            # Looking where it is going with a current frame: the frame's own depth is the
+            # evidence (drift-immune, and covers space nobody has mapped yet); the map only
+            # vetoes walls it already knows about.
+            clear = min(self._map_clear(r, d, unknown_blocks=False), r.fresh_clear if hor >= 0.3 else 12.0)
+        else:
+            clear = self._map_clear(r, d)  # blind or stale: only cleared space counts
         cap = self._governor(clear)
+        # Never starve at the frontier: with a fresh frame showing room ahead, keep creeping so
+        # the map can catch up (nothing is gained by hovering and waiting for it).
+        if aligned and fresh and r.fresh_clear > 3.0:
+            cap = max(cap, 0.6)
         if not aligned:
             cap = min(cap, 0.8)  # moving where the camera is not looking: blind, so slow
         if age > 2.0:

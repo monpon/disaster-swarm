@@ -31,6 +31,8 @@ W_CAP = 64.0
 CHUNK = 32
 MESH_MIN_INTERVAL_S = 0.25  # a chunk is re-meshed at most this often
 MESH_BUDGET_S = 0.2  # GPU time per worker cycle spent re-meshing dirty chunks
+SNAP_TOL = 0.6  # m: vertices this close to a straight-wall plane are put exactly on it
+SNAP_ALIGN = 0.8  # ... if their normal points along that plane's axis
 FILTER_SIGMA = 1.2  # voxels: Gaussian smoothing of the distance field before meshing
 FILTER_PAD = 3
 BLUR_WEIGHT_SAT = 0.0  # >0: voxels with more evidence count more in the blur (saturating here)
@@ -62,6 +64,9 @@ class Surface:
         self.offs = torch.arange(-MU, BEHIND + 1e-6, BAND_STEP, device=self.device)  # band offsets (m): front is negative
         self.dirty: dict[int, None] = {}  # chunks to re-mesh, oldest first (every chunk gets its turn)
         self.meshed_at: dict[int, float] = {}
+        self.planes: list[list[float]] = [[], [], []]  # straight-wall assumption: x, y, z plane positions
+        self.plane_stat: dict[tuple, list] = {}  # (axis, i) -> [sum, count] of aligned vertices near it
+        self.plane_on = True
         self.chunks: dict[int, dict] = {}  # chunk id -> {"ver", "v", "n", "c", "f"}
         self.tris = 0
         self.last_ms = 0.0
@@ -186,6 +191,39 @@ class Surface:
             self._mesh_chunk(cid)
         self.tris = sum(len(c["f"]) // 3 for c in self.chunks.values())
 
+    def set_planes(self, xs: list[float], ys: list[float], zs: list[float]) -> None:
+        """Assume the building's outer walls and roof are flat and axis-aligned: vertices near
+        these planes snap onto them, so walls are flat and corners exactly angular. The plane
+        positions are refined from the mesh itself (mean of the aligned vertices near each)."""
+        new = [list(map(float, xs)), list(map(float, ys)), list(map(float, zs))]
+        if new == self.planes:
+            return
+        self.planes = new
+        self.plane_stat.clear()
+        for cid in self.chunks:  # re-mesh everything with the new planes
+            self.dirty.setdefault(cid, None)
+            self.meshed_at.pop(cid, None)
+
+    def _snap(self, world, nrm):
+        """Snap vertices onto the straight-wall planes (in place); returns world, nrm."""
+        torch = self.torch
+        for a in range(3):
+            for i, p in enumerate(self.planes[a]):
+                st = self.plane_stat.setdefault((a, i), [0.0, 0])
+                near = ((world[:, a] - p).abs() < SNAP_TOL) & (nrm[:, a].abs() > SNAP_ALIGN)
+                if bool(near.any()):
+                    if st[1] < 4000:  # refine the plane from what is actually there
+                        st[0] += float(world[near, a].sum())
+                        st[1] += int(near.sum())
+                        if st[1] > 300:
+                            self.planes[a][i] = st[0] / st[1]
+                            p = self.planes[a][i]
+                    world[near, a] = p
+                    sgn = torch.sign(nrm[near, a])
+                    nrm[near] = 0.0
+                    nrm[near, a] = sgn
+        return world, nrm
+
     def _smooth_field(self, vol, obs, wgt):
         """Gaussian smoothing of the signed-distance field using only observed voxels
         (normalised convolution), so noisy views average into one smooth, flat surface."""
@@ -256,6 +294,8 @@ class Surface:
         col = self.col.view(nx, ny, nz, 3)[i0:i0 + n[0], j0:j0 + n[1], k0:k0 + n[2]][vi[:, 0], vi[:, 1], vi[:, 2]]
         origin = torch.tensor([i0, j0, k0], device=self.device, dtype=verts.dtype)
         world = (verts + origin + 0.5) * VOXEL
+        if self.plane_on and any(self.planes):
+            world, nrm = self._snap(world, nrm)
         # One transfer: positions, normals and colours packed together.
         packed = torch.cat([torch.round(world / POS_UNIT).clamp(0, 65535), torch.round(nrm * 127) + 128.0,
                             col.float()], dim=1).to(torch.int32).cpu().numpy()
