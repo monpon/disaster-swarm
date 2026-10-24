@@ -14,8 +14,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import torch
 
 from . import materials as M
+from .gpu import DEV
 from .building import Building
 from .config import SimConfig
 
@@ -83,6 +85,7 @@ class Radio:
         self.rng = rng
         self.base = np.array(building.base)
         self.n = cfg.n_drones
+        self._world = None
         self.routes = [Route() for _ in range(self.n)]
         self.link_cap = np.zeros((self.n + 1, self.n + 1))  # node 0 = base, i+1 = drone i
         self.snr = np.full((self.n + 1, self.n + 1), -100.0)  # link SNR (dB), what each ESP can measure
@@ -93,6 +96,11 @@ class Radio:
         self.frame_stats = np.zeros((self.n, 2), dtype=np.int64)  # delivered, dropped per drone
 
     # --------------------------------------------------------------- topology
+    def _make_world(self):
+        from .gcomms import World
+        vox = torch.as_tensor(self.b.vox.reshape(-1), device=DEV)
+        return World(self.b.vox.shape, vox != M.AIR, vox, None, below_ground_solid=True)
+
     def _materials_between(self, a: np.ndarray, b: np.ndarray, step: float = 0.5) -> np.ndarray:
         d = np.linalg.norm(b - a)
         n = max(int(d / step), 1)
@@ -102,17 +110,19 @@ class Radio:
     def update(self, pos: np.ndarray, alive: np.ndarray) -> None:
         nodes = np.vstack([self.base[None, :], pos])
         k = len(nodes)
+        up = np.r_[True, np.asarray(alive, dtype=bool)]
+        # every pair of nodes through the true building, in one GPU kernel
+        if self._world is None:
+            self._world = self._make_world()
+        from .gcomms import snr_pairs
+        ii, jj = np.triu_indices(k, 1)
+        tn = torch.as_tensor(nodes, dtype=torch.float32, device=DEV)
+        snr_p = snr_pairs(self._world, tn[torch.as_tensor(ii, device=DEV)], tn[torch.as_tensor(jj, device=DEV)]).cpu().numpy()
+        use = up[ii] & up[jj]
         cap = np.zeros((k, k))
         snr_m = np.full((k, k), -100.0)
-        for i in range(k):
-            for j in range(i + 1, k):
-                if (i and not alive[i - 1]) or not alive[j - 1]:
-                    continue
-                d = float(np.linalg.norm(nodes[i] - nodes[j]))
-                loss = path_loss_db(np.array(d)) + obstruction_db(self._materials_between(nodes[i], nodes[j]), 0.5)
-                snr = TX_DBM - loss - NOISE_DBM
-                snr_m[i, j] = snr_m[j, i] = snr
-                cap[i, j] = cap[j, i] = float(capacity_for(snr))
+        snr_m[ii[use], jj[use]] = snr_m[jj[use], ii[use]] = snr_p[use]
+        cap[ii[use], jj[use]] = cap[jj[use], ii[use]] = capacity_for(snr_p[use])
         self.link_cap = cap
         self.snr = snr_m
 

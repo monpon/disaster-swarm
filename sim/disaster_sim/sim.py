@@ -9,7 +9,9 @@ import numpy as np
 
 from . import materials as M
 from .building import generate_building
+from . import rustcore
 from .camera import RGBDCamera
+from .rustcore import RustCamera, make_core
 from .config import SimConfig
 from .control import FlightController
 from .esp import EspFleet
@@ -32,8 +34,7 @@ class Simulation:
             self.cfg = cfg
         cfg = self.cfg
         if hasattr(self, "master"):
-            self.master.smoother.close()
-            self.master.surface.close()
+            self.master.close()
         self.rng = np.random.default_rng(cfg.seed + 1000)
         self.b = generate_building(cfg)
         n = cfg.n_drones
@@ -42,11 +43,12 @@ class Simulation:
         self.fleet = QuadrotorFleet(n, start, yaw=np.zeros(n), battery_wh=cfg.battery_wh)
         self.fc = FlightController(n, max_speed=cfg.max_speed)
         self.esp = EspFleet(n, self.rng)
-        self.camera = RGBDCamera(self.b, cfg, self.rng)
+        self.core = make_core(self.b, cfg) if rustcore.AVAILABLE else None
+        self.camera = RustCamera(self.core, self.b, cfg, self.rng) if self.core is not None else RGBDCamera(self.b, cfg, self.rng)
         self.radio = Radio(self.b, cfg, self.rng)
         self.master = MasterController(cfg, self.b.vox.shape,
                                        (self.b.x0, self.b.y0, self.b.x1, self.b.y1, self.b.top) if cfg.known_outline else None,
-                                       self.pads, self.b.base, np.random.default_rng(cfg.seed + 2000))
+                                       self.pads, self.b.base, np.random.default_rng(cfg.seed + 2000), core=self.core)
         self.last_frames: list = [None] * n  # most recent frame the master received per drone
         self.backlog = [deque() for _ in range(n)]  # frames waiting for radio capacity
 
@@ -60,12 +62,21 @@ class Simulation:
         self._truth_cache = None
         self.map_error_cache: dict = {}
         self.cam_tick = 0
+        self.frame_queue: list = []
         self.prof: dict[str, float] = {}  # smoothed ms per call of each stage
         self._err_rng = np.random.default_rng(cfg.seed + 3000)
 
     def _tick(self, name: str, t0: float) -> None:
         d = (time.perf_counter() - t0) * 1000
         self.prof[name] = self.prof.get(name, d) * 0.95 + d * 0.05
+
+    def _unref(self, pkt) -> None:
+        """Release one hold on a frame's pool slot (Rust core); the slot is freed at zero."""
+        if pkt.slot >= 0 and self.core is not None:
+            pkt.refs -= 1
+            if pkt.refs <= 0:
+                self.core.free_slot(pkt.slot)
+                pkt.slot = -1
 
     def _should_capture(self, i: int) -> bool:
         """The ESP's camera policy: full rate normally; one frame a second for a relay, or a
@@ -99,12 +110,21 @@ class Simulation:
             elif isinstance(msg, ImuPacket):
                 self.master.on_telemetry(msg, self.t)
             else:
-                t0 = time.perf_counter()
-                self.master.on_frame(msg, self.t)
-                self._tick("on_frame", t0)
-                self.last_frames[drone] = msg
+                self.frame_queue.append(msg)  # fused as one GPU batch at the telemetry tick
+                old, self.last_frames[drone] = self.last_frames[drone], msg
+                msg.refs = 2  # held by the queue (until fused) and as its drone's latest frame
+                if old is not None:
+                    self._unref(old)
 
         if self._every(cfg.telemetry_hz):
+            self.master.apply_fuse_results(self.t)
+            if self.frame_queue:
+                t0 = time.perf_counter()
+                batch, self.frame_queue = self.frame_queue, []
+                self.master.on_frames(batch, self.t)
+                for pk in batch:
+                    self._unref(pk)
+                self._tick("fuse", t0)
             for pkt in self.esp.packets(f, self.t, dt, self.radio, [len(q) for q in self.backlog]):
                 self.radio.send_up(self.t, pkt.drone, pkt, pkt.nbytes)
             t0 = time.perf_counter()
@@ -127,7 +147,7 @@ class Simulation:
                 q = self.backlog[i]
                 q.append(pkt)
                 if len(q) > FRAME_BUFFER:
-                    q.popleft()  # onboard buffer full: oldest frame is lost
+                    self._unref(q.popleft())  # onboard buffer full: oldest frame is lost
                     self.radio.frame_stats[i, 1] += 1
             for i, q in enumerate(self.backlog):  # send buffered frames, oldest first
                 while q:
@@ -194,14 +214,16 @@ class Simulation:
         if m.npts < 100:
             return {}
         ids = self._err_rng.choice(m.npts, min(n, m.npts), replace=False)
-        ids = ids[~m.hidden(ids)]
+        g = m.gather_points(ids)
+        ids = ids[~g["hidden"]]
         if len(ids) < 50:
             return {}
+        keep = ~g["hidden"]
         v = self.b.vox
         solid = v != M.AIR
         sh = np.array(v.shape)
         out = {}
-        for name, pos in (("raw", m.praw[ids]), ("smooth", m.spos[ids])):
+        for name, pos in (("raw", g["raw"][keep]), ("smooth", g["smooth"][keep])):
             c = np.floor(pos).astype(int)
             offs = np.array([(a, b, d) for a in (-1, 0, 1) for b in (-1, 0, 1) for d in (-1, 0, 1)])
             cells = c[:, None, :] + offs[None]
@@ -263,19 +285,19 @@ class Simulation:
             "align_ok": round(self.master.map.align_ok / max(self.master.map.align_n, 1), 3),
             "align_mm": round(1000 * float(np.mean(self.master.align_dp or [0.0])), 0),
             "points": int(self.master.map.npts),
-            "prof": {k: round(v, 2) for k, v in self.prof.items()},
+            "prof": {**{k: round(v, 2) for k, v in self.prof.items()}, "fuse_gpu": round(self.master.fuse_ms, 1)},
             "brakes": int(self.master.brakes),
             "first_inside": None if self.master.first_inside_t is None else round(float(self.master.first_inside_t), 1),
             "lost_events": int(self.master.lost_events),
             "slots": len(self.master.slots),
             "thumbs": int(self.radio.stats["thumbs"]),
             "ext_cov": round(float(self.master.ext_cov), 3),
-            "smoother": self.master.smoother.backend,
+            "smoother": "rust" if self.master.smoother is None else self.master.smoother.backend,
             "mesh": {"backend": self.master.surface.backend,
                      "tris": int(self.master.surface.tris) if self.master.surface.available else 0,
                      "chunks": len(self.master.surface.chunks) if self.master.surface.available else 0,
                      "ms": round(self.master.surface.last_ms, 1) if self.master.surface.available else 0.0},
-            "smooth_ms": round(self.master.smoother.last_ms, 1),
+            "smooth_ms": 0.0 if self.master.smoother is None else round(self.master.smoother.last_ms, 1),
             **self.map_error_cache,
             "drift": round(float(np.mean([self.master.vio.drift(i) for i in range(f.n)
                                           if not f.grounded[i] and not f.crashed[i]] or [0.0])), 2),

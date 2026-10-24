@@ -17,6 +17,7 @@ import threading
 import time
 
 import numpy as np
+import torch
 
 VOXEL = 0.2  # m
 MU = 0.5  # truncation distance in front of the surface (m)
@@ -41,15 +42,19 @@ MAX_QUEUE = 48
 BATCH = 24
 
 
+class _null:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
 class Surface:
     def __init__(self, site_shape: tuple[int, int, int]):
         self.available = False
         self.backend = "off"
-        try:
-            import torch
-            from .gpumc import GpuMarchingCubes
-        except ImportError:
-            return
+        from .gpumc import GpuMarchingCubes
         self.torch = torch
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.backend = "cuda" if self.device.type == "cuda" else "torch-cpu"
@@ -74,24 +79,21 @@ class Surface:
         self.mc = GpuMarchingCubes(torch, self.device)
         self.q: queue.Queue = queue.Queue(maxsize=MAX_QUEUE)
         self._stop = threading.Event()
+        self.stream = torch.cuda.Stream() if self.device.type == "cuda" else None
         self._thread = threading.Thread(target=self._run, name="surface", daemon=True)
         self._thread.start()
         self.available = True
 
     # ------------------------------------------------------------------ input
-    def add(self, pos: np.ndarray, dirs: np.ndarray, depth: np.ndarray, rgb: np.ndarray) -> None:
-        """Queue one aligned frame: camera position, (N,3) world ray directions, (N,) depth, (N,3) rgb."""
+    def add_batch(self, pos: torch.Tensor, dirs: torch.Tensor, depth: torch.Tensor, rgb: torch.Tensor) -> None:
+        """Queue B aligned frames: camera positions (B,3), world ray directions (B,N,3), depth
+        (B,N), rgb (B,N,3). All tensors already on the device."""
         if not self.available:
             return
-        d = depth.reshape(-1)
-        ok = (d > MIN_DEPTH) & (d <= MAX_DEPTH)
-        if ok.sum() < 20:
-            return
-        try:
-            self.q.put_nowait((pos.astype(np.float32), dirs[ok].astype(np.float32), d[ok].astype(np.float32),
-                               rgb.reshape(-1, 3)[ok].astype(np.uint8)))
+        try:  # one item per batch; the worker does the masking, so the caller never waits on the GPU
+            self.q.put_nowait((pos, dirs, depth, rgb))
         except queue.Full:
-            pass  # the GPU is behind: drop this frame
+            pass  # the GPU is behind: drop this batch
 
     def close(self) -> None:
         if self.available:
@@ -109,9 +111,12 @@ class Surface:
                 pass
             t0 = time.perf_counter()
             try:
-                if batch:
-                    self._integrate(batch)
-                self._mesh_dirty()
+                with torch.cuda.stream(self.stream) if self.stream is not None else _null():
+                    if batch:
+                        self._integrate(batch)
+                    self._mesh_dirty()
+                    if self.stream is not None:
+                        self.stream.synchronize()
             except Exception as e:  # never take the sim down
                 print(f"surface error: {e!r}", flush=True)
             if batch or self.dirty:
@@ -119,10 +124,14 @@ class Surface:
 
     def _integrate(self, batch: list) -> None:
         torch, dev = self.torch, self.device
-        pos = torch.as_tensor(np.concatenate([np.repeat(b[0][None], len(b[2]), 0) for b in batch]), device=dev)
-        dirs = torch.as_tensor(np.concatenate([b[1] for b in batch]), device=dev)
-        depth = torch.as_tensor(np.concatenate([b[2] for b in batch]), device=dev)
-        rgb = torch.as_tensor(np.concatenate([b[3] for b in batch]), device=dev).float()
+        ps, ds, dp, cs = [], [], [], []
+        for p, d, z, c in batch:
+            ok = (z > MIN_DEPTH) & (z <= MAX_DEPTH)
+            ps.append(p[:, None, :].expand(-1, z.shape[1], 3)[ok])
+            ds.append(d[ok])
+            dp.append(z[ok])
+            cs.append(c[ok])
+        pos, dirs, depth, rgb = torch.cat(ps), torch.cat(ds), torch.cat(dp), torch.cat(cs).float()
         wf = 4.0 / depth.clamp_min(1.0) ** 2  # near views count more
 
         # Band around the hit: signed distance (positive in front of the surface).

@@ -8,8 +8,10 @@ from __future__ import annotations
 import base64
 
 import numpy as np
+import torch
 
 from . import materials as M
+from .gpu import DEV
 from .sim import Simulation
 
 SEEN_UNITS_PER_S = 2  # proper-scan times are quantized to half seconds (uint16, 0 = never)
@@ -30,7 +32,8 @@ def world_message(sim: Simulation) -> dict:
 
 
 class MapStream:
-    """Cursor into the master's map for the shared broadcast: what viewers already have."""
+    """Cursor into the master's map for the shared broadcast: what viewers already have. The
+    bookkeeping (what was sent of every point) lives on the GPU next to the point store."""
 
     MAX_POINT_UPDATES = 4000  # per broadcast; the rest follows on later ones
     CANDIDATES = 40000
@@ -39,52 +42,73 @@ class MapStream:
     def __init__(self, sim: Simulation):
         self.sim = sim
         self.tick = -1
-        self.sent_ver = np.zeros(0, dtype=np.int64)  # per point: version the viewers have (-1 = never sent)
-        self.sent_raw = np.zeros((0, 3), np.float32)
-        self.sent_sm = np.zeros((0, 3), np.float32)
-        self.sent_hid = np.zeros(0, bool)
+        self.cap = 0
+        self.sent_ver = torch.zeros(0, dtype=torch.int32, device=DEV)  # per point: version the viewers have (-1 = never)
+        self.sent_raw = torch.zeros((0, 3), dtype=torch.float32, device=DEV)
+        self.sent_sm = torch.zeros((0, 3), dtype=torch.float32, device=DEV)
+        self.sent_hid = torch.zeros(0, dtype=torch.bool, device=DEV)
         self.sent_chunks: dict[int, tuple] = {}  # chunk id -> (version, order sent)
         self.sent_n = 0
-        self.seen_sent = sim.master.map.seen.copy()
+        self.seen_sent = sim.master.map.g_seen.clone()
 
+    def _grow(self, n: int) -> None:
+        if n <= self.cap:
+            return
+        cap = max(n, 2 * self.cap, 1 << 16)
+        pad = cap - self.cap
+        self.sent_ver = torch.cat([self.sent_ver, torch.full((pad,), -1, dtype=torch.int32, device=DEV)])
+        self.sent_raw = torch.cat([self.sent_raw, torch.zeros((pad, 3), device=DEV)])
+        self.sent_sm = torch.cat([self.sent_sm, torch.zeros((pad, 3), device=DEV)])
+        self.sent_hid = torch.cat([self.sent_hid, torch.zeros(pad, dtype=torch.bool, device=DEV)])
+        self.cap = cap
+
+    @torch.no_grad()
     def deltas(self, full: bool = False) -> dict:
         """Map voxels changed since the last broadcast (or everything occupied, for a new client)."""
         m = self.sim.master.map
+        return self._deltas_locked(m, full)
+
+    def _deltas_locked(self, m, full: bool) -> dict:
         idx, occ, mat, rgb, q = m.deltas_since(-1 if full else self.tick)
         if not full:
             self.tick = self.sim.master.tick
         o = np.flatnonzero(occ)
         free = idx[~occ] if not full else np.zeros(0, dtype=np.int64)  # a new client starts empty
         n = m.npts
-        if len(self.sent_ver) < n:
-            grow = max(n, 2 * len(self.sent_ver)) - len(self.sent_ver)
-            self.sent_ver = np.r_[self.sent_ver, np.full(grow, -1)]
-            self.sent_raw = np.r_[self.sent_raw, np.zeros((grow, 3), np.float32)]
-            self.sent_sm = np.r_[self.sent_sm, np.zeros((grow, 3), np.float32)]
-            self.sent_hid = np.r_[self.sent_hid, np.zeros(grow, bool)]
+        self._grow(n)
         if full:
-            ids = np.arange(n)
+            ids = torch.arange(n, device=DEV)
         else:
-            cand = np.flatnonzero(self.sent_ver[:n] != m.pver[:n].astype(np.int64))[:self.CANDIDATES]
+            cand = torch.nonzero(self.sent_ver[:n] != m.pver[:n]).squeeze(1)[:self.CANDIDATES]
             # Only changes a viewer could see: new points, moves over 4 cm, hidden/shown flips.
-            moved = (np.abs(m.praw[cand] - self.sent_raw[cand]).max(1) > self.MIN_MOVE) \
-                | (np.abs(m.spos[cand] - self.sent_sm[cand]).max(1) > self.MIN_MOVE) \
-                | (m.hidden(cand) != self.sent_hid[cand]) | (self.sent_ver[cand] < 0)
-            self.sent_ver[cand[~moved]] = m.pver[cand[~moved]]  # nothing to show: considered synced
+            hid = m.hidden(cand)
+            moved = ((m.praw[cand] - self.sent_raw[cand]).abs().amax(1) > self.MIN_MOVE) \
+                | ((m.spos[cand] - self.sent_sm[cand]).abs().amax(1) > self.MIN_MOVE) \
+                | (hid != self.sent_hid[cand]) | (self.sent_ver[cand] < 0)
+            quiet = cand[~moved]
+            self.sent_ver[quiet] = m.pver[quiet]  # nothing to show: considered synced
             ids = cand[moved][:self.MAX_POINT_UPDATES]
+        hidden = m.hidden(ids)
         self.sent_ver[ids] = m.pver[ids]
-        self.sent_raw[ids], self.sent_sm[ids], self.sent_hid[ids] = m.praw[ids], m.spos[ids], m.hidden(ids)
-        conf = np.minimum(m.nview[ids] // 2, 3).astype(np.uint8)  # confidence bucket 0..3 from views
-        flag = m.hidden(ids).astype(np.uint8) | (conf << 1)
+        self.sent_raw[ids], self.sent_sm[ids], self.sent_hid[ids] = m.praw[ids], m.spos[ids], hidden
+        conf = torch.clamp(m.nview[ids] // 2, max=3)
+        flag = (hidden.to(torch.int32) | (conf << 1)).to(torch.uint8).cpu().numpy()
         unit = 0.05
+        vox, _ = m._flat(m.praw[ids])
+        h = {
+            "ids": ids.cpu().numpy(),
+            "raw": torch.round(m.praw[ids] / unit).clamp(0, 65535).cpu().numpy(),
+            "sm": torch.round(torch.clamp(m.spos[ids], 0, 3200) / unit).clamp(0, 65535).cpu().numpy(),
+            "col": m.pcol[ids].cpu().numpy(),
+            "resid": torch.clamp(torch.round(m.presid[ids] * 255), max=255).cpu().numpy(),
+            "npass": m.g_npass[vox].clamp(max=255).cpu().numpy(),
+        }
         return {"idx": b64(idx[o], "<i4"), "mat": b64(mat[o], "u1"), "rgb": b64(rgb[o], "<u2"),
                 "q": b64(q[o], "u1"), "free": b64(free, "<i4"), "n": int(len(o)),
-                "uidx": b64(ids, "<u4"), "upos": b64(np.rint(m.praw[ids] / unit), "<u2"),
-                "uspos": b64(np.rint(np.clip(m.spos[ids], 0, 3200) / unit), "<u2"),
-                "ucol": b64(m.pcol[ids], "u1"), "uflag": b64(flag, "u1"),
-                "uresid": b64(np.minimum(np.rint(m.presid[ids] * 255), 255), "u1"),
-                "unpass": b64(m.npass[m.flat_of(m.praw[ids])[0]], "u1"),
-                "nu": int(len(ids)), "ptotal": int(n), "surf": self.surface(full)}
+                "uidx": b64(h["ids"], "<u4"), "upos": b64(h["raw"], "<u2"), "uspos": b64(h["sm"], "<u2"),
+                "ucol": b64(h["col"], "u1"), "uflag": b64(flag, "u1"), "uresid": b64(h["resid"], "u1"),
+                "unpass": b64(h["npass"], "u1"),
+                "nu": int(len(h["ids"])), "ptotal": int(n), "surf": self.surface(full)}
 
     def surface(self, full: bool) -> list:
         """Mesh chunks that changed (or all of them, for a new client). A chunk replaces the
@@ -101,15 +125,54 @@ class MapStream:
                         "f": b64(c["f"], "<u4" if wide else "<u2"), "w": bool(wide)})
         return out
 
+    @torch.no_grad()
     def seen(self, full: bool = False) -> dict:
         """Proper-scan times of surfaces re-scanned since the last broadcast (or all, if full)."""
         m = self.sim.master.map
-        changed = (m.seen >= 0) if full else (m.seen != self.seen_sent)
-        idx = np.flatnonzero(changed & (m.lo >= 4))
+        return self._seen_locked(m, full)
+
+    def _seen_locked(self, m, full: bool) -> dict:
+        changed = (m.g_seen >= 0) if full else (m.g_seen != self.seen_sent)
+        idx = torch.nonzero(changed & (m.g_lo >= 4)).squeeze(1)
         if not full:
-            self.seen_sent[:] = m.seen
-        t = np.minimum(np.rint(m.seen[idx] * SEEN_UNITS_PER_S) + 1, 65535)
-        return {"idx": b64(idx, "<i4"), "t": b64(t, "<u2")}
+            self.seen_sent.copy_(m.g_seen)
+        t = torch.clamp(torch.round(m.g_seen[idx] * SEEN_UNITS_PER_S) + 1, max=65535)
+        return {"idx": b64(idx.cpu().numpy(), "<i4"), "t": b64(t.cpu().numpy(), "<u2")}
+
+
+class RustMapStream(MapStream):
+    """The same stream as `MapStream`, with every compaction done on the Rust core."""
+
+    def __init__(self, sim: Simulation):
+        self.sim = sim
+        self.tick = -1
+        self.sent_chunks: dict[int, tuple] = {}
+        self.sent_n = 0
+
+    def deltas(self, full: bool = False) -> dict:
+        m = self.sim.master.map
+        v = m.core.vox_deltas(-1 if full else self.tick)
+        if not full:
+            self.tick = self.sim.master.tick
+        idx, occ = np.asarray(v["idx"]), np.asarray(v["occ"]).astype(bool)
+        mat, rgb, q = np.asarray(v["mat"]), np.asarray(v["rgb"]), np.asarray(v["q"])
+        o = np.flatnonzero(occ)
+        free = idx[~occ] if not full else np.zeros(0, dtype=np.int64)  # a new client starts empty
+        p = m.core.point_updates(full, self.MAX_POINT_UPDATES, self.MIN_MOVE)
+        return {"idx": b64(idx[o], "<i4"), "mat": b64(mat[o], "u1"), "rgb": b64(rgb[o], "<u2"), "q": b64(q[o], "u1"),
+                "free": b64(free, "<i4"), "n": int(len(o)),
+                "uidx": b64(p["ids"], "<u4"), "upos": b64(p["raw"], "<u2"), "uspos": b64(p["sm"], "<u2"),
+                "ucol": b64(p["col"], "u1"), "uflag": b64(p["flag"], "u1"), "uresid": b64(p["resid"], "u1"),
+                "unpass": b64(p["npass"], "u1"), "nu": int(len(p["ids"])), "ptotal": int(p["npts"]),
+                "surf": self.surface(full)}
+
+    def seen(self, full: bool = False) -> dict:
+        s = self.sim.master.map.core.seen_updates(full)
+        return {"idx": b64(np.asarray(s["idx"]), "<i4"), "t": b64(np.asarray(s["t"]), "<u2")}
+
+
+def make_stream(sim: Simulation) -> MapStream:
+    return RustMapStream(sim) if getattr(sim.master.map, "rust", False) else MapStream(sim)
 
 
 def state_message(sim: Simulation, stream: MapStream, since_event: int, extra: dict,
@@ -145,15 +208,19 @@ def feed_message(sim: Simulation, drone: int) -> dict | None:
     est = sim.master.last_depth[drone] if 0 <= drone < len(sim.master.last_depth) else None
     if f is None or est is None:
         return {"type": "feed", "drone": drone, "t": None}
+    h, w = sim.cfg.cam_h, sim.cfg.cam_w
+    est = (est if isinstance(est, np.ndarray) else est.cpu().numpy()).reshape(h, w)
+    rgb = sim.core.rgb(f.slot) if (f.slot >= 0 and sim.core is not None) else f.rgb.cpu().numpy()
+    rgb = np.asarray(rgb)
     depth = np.where(est > 0, np.clip(255 - est / sim.cfg.depth_max * 255, 1, 255), 0)
     return {
         "type": "feed",
         "drone": drone,
         "t": round(float(f.t), 2),
         "age": round(float(sim.t - f.t), 2),
-        "w": int(f.rgb.shape[1]),
-        "h": int(f.rgb.shape[0]),
-        "rgb": b64(f.rgb, "u1"),
+        "w": int(rgb.shape[1]),
+        "h": int(rgb.shape[0]),
+        "rgb": b64(rgb, "u1"),
         "depth": b64(depth, "u1"),
         "frames": [int(v) for v in sim.radio.frame_stats[drone]],
         "backlog": len(sim.backlog[drone]),

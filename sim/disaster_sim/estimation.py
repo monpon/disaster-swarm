@@ -16,6 +16,8 @@ are the only code that reads it:
 from __future__ import annotations
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 KEYFRAME_SPACING = 3.0
 LOOP_RADIUS = 2.0
@@ -112,6 +114,10 @@ class SimulatedVIO:
 class SimulatedDepthNet:
     def __init__(self, cfg, rng: np.random.Generator):
         self.rng = rng
+        from .gpu import DEV
+        self.dev = DEV
+        self.gen = torch.Generator(device=DEV)
+        self.gen.manual_seed(int(rng.integers(1 << 31)))
         self.scale_sigma = cfg.depth_scale_sigma
         self.region_sigma = cfg.depth_region_sigma
         self.depth_max = cfg.depth_max
@@ -136,3 +142,27 @@ class SimulatedDepthNet:
         noise = self.rng.normal(0.0, 0.02, (h, w))
         est = d * scale * (1.0 + region + noise)
         return np.where(valid & (est > 0.1) & (est < self.depth_max), est, 0.0).astype(np.float32)
+
+    @torch.no_grad()
+    def estimate_batch(self, depth: torch.Tensor, thumb: list[bool]) -> torch.Tensor:
+        """Monocular depth estimates for B frames at once. depth (B,H,W) true depth (0 = no
+        return / sky); returns (B,H,W) float32, 0 where the estimate should not be trusted."""
+        B, H, W = depth.shape
+        dev = depth.device
+        valid = depth > 0
+        d = torch.where(valid, depth, torch.zeros_like(depth))
+        # Depth networks smooth across object boundaries: blend with a 3x3 box blur (valid pixels only).
+        pad = F.pad(torch.where(valid, d, torch.full_like(d, float("nan")))[:, None], (1, 1, 1, 1), mode="replicate")[:, 0]
+        win = torch.stack([pad[:, y:y + H, x:x + W] for y in range(3) for x in range(3)])
+        ok = ~torch.isnan(win)
+        blur = torch.where(ok, win, torch.zeros_like(win)).sum(0) / ok.sum(0).clamp_min(1)
+        d = torch.where(valid, 0.75 * d + 0.25 * blur, torch.zeros_like(d))
+        # Per-frame scale error and blocky region errors (4x4 pixel blocks); thumbnails are worse.
+        q = torch.where(torch.as_tensor(thumb, device=dev), 1.6, 1.0).float()[:, None, None]
+        scale = torch.exp(torch.randn((B, 1, 1), device=dev, generator=self.gen) * self.scale_sigma * q)
+        bh, bw = -(-H // 4), -(-W // 4)
+        region = torch.randn((B, bh, bw), device=dev, generator=self.gen) * self.region_sigma * q
+        region = region.repeat_interleave(4, 1).repeat_interleave(4, 2)[:, :H, :W]
+        noise = torch.randn((B, H, W), device=dev, generator=self.gen) * 0.02
+        est = d * scale * (1.0 + region + noise)
+        return torch.where(valid & (est > 0.1) & (est < self.depth_max), est, torch.zeros_like(est)).float()

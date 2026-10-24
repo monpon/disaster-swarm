@@ -50,6 +50,8 @@ class FramePacket:
     rgb: np.ndarray  # (H, W, 3) uint8, as decoded by the master
     nbytes: int  # JPEG size on the wire
     thumb: bool = False  # sent as a small thumbnail because the link could not carry the full frame
+    slot: int = -1  # frame-pool slot on the device (Rust core); rgb/depth then live there
+    refs: int = 1  # holders of the pool slot: in transit/queue, last frame of its drone
     sim_truth: dict = field(default_factory=dict, repr=False)
 
 

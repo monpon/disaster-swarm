@@ -17,15 +17,19 @@ Mission phases:
 """
 from __future__ import annotations
 
+import queue
+import threading
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
+import torch
 from scipy import ndimage
 from scipy.optimize import linear_sum_assignment
 
-from .align import align_frame
+from .align import Alignment, align_batch
 from .comms import M_HOLD, M_MIN, LinkModel, plan_chain
-from .camera import Frame
+from .gpu import DEV
 from .entry import opening_cue, ray_angles, servo_sticks
 from .estimation import SimulatedDepthNet, SimulatedVIO
 from .packets import FramePacket, ImuPacket, StickCommand
@@ -35,6 +39,7 @@ from .planner3d import NavGrid, to_waypoints
 from .smoothing import Smoother
 from .surface import Surface
 from .radio import NOISE_DBM, SLAB_DB, TX_DBM, WALL_DB, capacity_for, path_loss_db
+from .rustcore import RustMap
 from .voxelmap import FREE_T, OCC_T, VoxelMap
 
 IDLE, TAKEOFF, SURVEY, WAIT, ENTER, EXPLORE, INVESTIGATE, RELAY, RTB, LANDING, CHARGING, CRASHED = (
@@ -186,9 +191,10 @@ class Candidate:
 
 
 class MasterController:
-    def __init__(self, cfg: SimConfig, shape, outline, pads: np.ndarray, base, rng: np.random.Generator):
+    def __init__(self, cfg: SimConfig, shape, outline, pads: np.ndarray, base, rng: np.random.Generator, core=None):
         self.cfg = cfg
-        self.map = VoxelMap(shape, cfg)
+        self.core = core  # the Rust/CUDA core, when in use
+        self.map = RustMap(core, shape, cfg) if core is not None else VoxelMap(shape, cfg)
         self.shape = tuple(shape)
         self.env_known = False
         self.keep = None
@@ -211,7 +217,19 @@ class MasterController:
         self.verified = np.zeros(self.shape, dtype=bool)  # surfaces that got their re-scan
         self.verify_since: float | None = None
         self.verify_empty_since: float | None = None
-        self.smoother = Smoother()
+        self.smoother = Smoother() if core is None else None
+        self.fuse_q: queue.Queue = queue.Queue(maxsize=6)
+        self.fuse_out: queue.Queue = queue.Queue()
+        self.fuse_busy = False
+        self.fuse_ms = 0.0
+        self._fuse_stop = threading.Event()
+        if core is None:
+            threading.Thread(target=self._fuse_loop, name="fuse", daemon=True).start()
+        self._rays_t = None
+        if core is not None:
+            import torch
+            from .gpu import DEV
+            self._rays_t = torch.as_tensor(self.map.k.body_rays, dtype=torch.float32, device=DEV)
         self.surface = Surface(shape)  # GPU TSDF + marching cubes (off without torch/skimage)
         self.prng = np.random.default_rng(7)
         self.align_dp: list[float] = []
@@ -439,48 +457,176 @@ class MasterController:
         self._set_envelope(new, replan=self.phase == "scout")
 
     # ------------------------------------------------------------------ inputs
-    def on_frame(self, pkt: FramePacket, t: float) -> None:
-        """Estimate pose (VIO) and depth (mono depth net) for a received frame, then fuse it."""
-        i = pkt.drone
-        pos, rot = self.vio.pose(i, pkt.sim_truth)
-        depth = self.depthnet.estimate(pkt.sim_truth["depth"], pkt.thumb)
-        self.last_depth[i] = depth
-        # Register the frame against the map (pose + depth scale), then fuse the corrected frame.
-        m = self.map
-        m.align_n += 1
-        al = align_frame(m, pos, m.k.rays(rot), depth.reshape(-1), pkt.t, i)
-        if al is not None:
-            m.align_ok += 1
+    def on_frames(self, pkts: list, t: float) -> None:
+        """Hand a batch of received frames to the fuse worker (everything numeric for the whole
+        batch runs there as a handful of GPU kernels, overlapped with physics and planning on
+        this thread). Poses come from the VIO here, because the VIO is this thread's state."""
+        if not pkts:
+            return
+        poses, rots = [], []
+        for p in pkts:
+            pos, rot = self.vio.pose(p.drone, p.sim_truth)
+            poses.append(pos)
+            rots.append(rot)
+        want_cue = [self.drones[p.drone].mode == ENTER and self.drones[p.drone].stage in ("align", "servo")
+                    and self.drones[p.drone].entry is not None for p in pkts]
+        job = {"pkts": pkts, "poses": poses, "rots": rots, "want_cue": want_cue, "t": t}
+        if self.core is not None:  # ~0.5 ms on the core: fuse inline, no worker thread
+            self._deliver(self._fuse_rust(job), t)
+            return
+        try:
+            self.fuse_q.put(job, timeout=0.5)
+        except queue.Full:  # the worker is far behind: fuse here rather than lose the frames
+            self._deliver(self._fuse(job), t)
+
+    def apply_fuse_results(self, t: float) -> None:
+        """Apply what the fuse worker found (alignment corrections for the VIO, forward
+        clearance and the emergency brake, survivor sightings): master state changes only here."""
+        while True:
+            try:
+                res = self.fuse_out.get_nowait()
+            except queue.Empty:
+                return
+            self._deliver(res, t)
+
+    def _fuse_rust(self, job: dict) -> dict:
+        """The same batch of frames, fused by the Rust core (one call: depth network, alignment,
+        carving, hits, passes, classification, point store)."""
+        pkts, want = job["pkts"], job["want_cue"]
+        B, m = len(pkts), self.map
+        res = self.core.fuse(
+            [p.slot for p in pkts], np.stack(job["poses"]).astype(np.float32), np.stack(job["rots"]).astype(np.float32),
+            np.array([p.t for p in pkts], dtype=np.float32), np.array([p.drone for p in pkts], dtype=np.int32),
+            [int(p.thumb) for p in pkts], int(self.prng.integers(1 << 62)), self.cfg.depth_scale_sigma,
+            self.cfg.depth_region_sigma, self.cfg.depth_max, self.tick)
+        m._gen += 1
+        m.frames += B
+        m.npts = int(res["npts"])
+        a = np.asarray(res["ares"])
+        als = []
+        m.align_n += B
+        for b in range(B):
+            if a[b, 0] > 0.5:
+                m.align_ok += 1
+                als.append(Alignment(a[b, 1:4].astype(float), a[b, 4:13].reshape(3, 3).astype(float), float(a[b, 13]), int(a[b, 19]),
+                                     a[b, 14:17].astype(float), float(a[b, 17]), float(a[b, 18]), float(a[b, 20]), float(a[b, 21])))
+            else:
+                als.append(None)
+        est = np.asarray(self.core.estimates(B))
+        H, W = self.cfg.cam_h, self.cfg.cam_w
+        for b, p in enumerate(pkts):
+            self.last_depth[p.drone] = est[b].reshape(H, W)
+        pos_c, rot_c = np.asarray(res["pos"]).astype(float), np.asarray(res["rot"]).astype(float)
+        # the TSDF/mesh worker still runs on torch: hand it the corrected frames
+        import torch
+        from .gpu import DEV
+        rgb = torch.as_tensor(np.asarray(self.core.rgbs([p.slot for p in pkts])), device=DEV)
+        pos_t = torch.as_tensor(pos_c.astype(np.float32), device=DEV)
+        rot_t = torch.as_tensor(rot_c.astype(np.float32), device=DEV)
+        est_t = torch.as_tensor(est, device=DEV)
+        dirs = torch.einsum("nk,bjk->bnj", self._rays_t, rot_t)
+        self.surface.add_batch(pos_t, dirs, est_t, rgb)
+        det = {}
+        sv = np.asarray(res["surv"])
+        for b in np.unique(sv[:, 0].astype(int)) if len(sv) else []:
+            sel = sv[:, 0].astype(int) == b
+            det[int(b)] = (sv[sel, 1:4].astype(float), sv[sel, 4].astype(float))
+        return {"pkts": pkts, "poses": [pos_c[b] for b in range(B)], "rots": [rot_c[b] for b in range(B)], "als": als,
+                "clear": np.asarray(res["clear"]), "cue": {b: est[b].reshape(H, W) for b in range(B) if want[b]}, "det": det}
+
+    def _fuse_loop(self) -> None:
+        while not self._fuse_stop.is_set():
+            try:
+                job = self.fuse_q.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            try:
+                t0 = time.perf_counter()
+                self.fuse_out.put(self._fuse(job))
+                self.fuse_ms = self.fuse_ms * 0.8 + (time.perf_counter() - t0) * 1000 * 0.2
+            except Exception as e:  # never take the sim down
+                print(f"fuse error: {e!r}", flush=True)
+            finally:
+                self.fuse_busy = self.fuse_q.qsize() > 0
+
+    @torch.no_grad()
+    def _fuse(self, job: dict) -> dict:
+        """The GPU half of frame ingestion for one batch (runs in the fuse worker)."""
+        pkts, poses, rots = job["pkts"], list(job["poses"]), list(job["rots"])
+        m, dev = self.map, DEV
+        B = len(pkts)
+        if True:  # no long lock: a torn read of the map is harmless for planning, and the planner must not wait
+            truth = torch.stack([p.sim_truth["depth"] for p in pkts])  # (B,H,W), never left the GPU
+            depth = self.depthnet.estimate_batch(truth, [p.thumb for p in pkts])
+            dflat = depth.reshape(B, -1)
+            drones = torch.as_tensor([p.drone for p in pkts], device=dev)
+            tt = torch.as_tensor([p.t for p in pkts], device=dev, dtype=torch.float32)
+            pos_t = torch.as_tensor(np.stack(poses), device=dev, dtype=torch.float32)
+            rot_t = torch.as_tensor(np.stack(rots), device=dev, dtype=torch.float32)
+            dirs = torch.einsum("nk,bjk->bnj", m.t_rays, rot_t)
+            m.align_n += B
+            als = align_batch(m, pos_t, dirs, dflat, tt, drones)
+            scale = np.ones(B, dtype=np.float32)
+            for b, al in enumerate(als):
+                if al is not None:
+                    m.align_ok += 1
+                    poses[b], rots[b], scale[b] = poses[b] + al.dp, al.rot @ rots[b], al.scale
+            if any(a is not None for a in als):
+                pos_t = torch.as_tensor(np.stack(poses), device=dev, dtype=torch.float32)
+                rot_t = torch.as_tensor(np.stack(rots), device=dev, dtype=torch.float32)
+                sc = torch.as_tensor(scale, device=dev)
+                depth, dflat = depth * sc[:, None, None], dflat * sc[:, None]
+                dirs = torch.einsum("nk,bjk->bnj", m.t_rays, rot_t)
+            for b, p in enumerate(pkts):
+                self.last_depth[p.drone] = depth[b]
+            # what each frame shows straight ahead (drift-immune), for the brake and the speed governor
+            if self._az is None:
+                self._az, self._el = ray_angles(m.k.body_rays)
+            if self._cone is None:
+                self._cone = (np.abs(self._az) < 0.26) & (np.abs(self._el) < 0.2)
+            cone = torch.as_tensor(np.flatnonzero(self._cone), device=dev)
+            dc = dflat[:, cone]
+            clear = torch.where(dc > 0, dc, torch.full_like(dc, float("inf"))).min(1).values.clamp(max=12.0).cpu().numpy()
+            cue_depth = {b: depth[b].cpu().numpy() for b in range(B) if job["want_cue"][b]}
+            rgb = torch.stack([p.rgb.reshape(-1, 3) for p in pkts])
+            self.surface.add_batch(pos_t, dirs, dflat, rgb)
+            det = m.integrate_batch(pos_t, rot_t, dflat, rgb, tt, drones, self.tick)
+        return {"pkts": pkts, "poses": poses, "rots": rots, "als": als, "clear": clear, "cue": cue_depth, "det": det}
+
+    def _deliver(self, res: dict, t: float) -> None:
+        pkts, poses, rots = res["pkts"], res["poses"], res["rots"]
+        for b, al in enumerate(res["als"]):
+            if al is None:
+                continue
             self.align_dp.append(float(np.linalg.norm(al.dp)))
             self.align_dp = self.align_dp[-200:]
-            pos, rot, depth = pos + al.dp, al.rot @ rot, (depth * al.scale).astype(np.float32)
             if al.cross >= 0.3:  # only against what other drones mapped: not chasing its own drift
-                self.vio.correct(i, al.obs_dp, al.obs_dyaw)
-        self._update_cue(self.drones[i], pkt.t, pos, rot, depth)
-        self._clear_ahead(self.drones[i], pkt.t, t, rot, depth)
-        self.surface.add(pos, m.k.rays(rot), depth, pkt.rgb)
-        f = Frame(i, pkt.t, pos, rot, depth, pkt.rgb)
-        det = self.map.integrate(f, self.tick, i)
-        pts, dist = det["survivor_pts"], det["survivor_dist"]
-        used = np.zeros(len(pts), dtype=bool)
-        for i in range(len(pts)):  # one detection per cluster of survivor pixels
-            if used[i]:
-                continue
-            near = np.linalg.norm(pts - pts[i], axis=1) < ASSOC_RADIUS
-            used |= near
-            self._associate(pts[near].mean(axis=0), float(dist[near].min()), f.drone, t)
+                self.vio.correct(pkts[b].drone, al.obs_dp, al.obs_dyaw)
+        for b, p in enumerate(pkts):
+            r = self.drones[p.drone]
+            self._note_clear(r, p.t, t, rots[b], float(res["clear"][b]))
+            if b in res["cue"] and r.mode == ENTER and r.stage in ("align", "servo") and r.entry is not None:
+                self._update_cue(r, p.t, poses[b], rots[b], res["cue"][b])
+        for b, (pts, dist) in res["det"].items():
+            used = np.zeros(len(pts), dtype=bool)
+            for k in range(len(pts)):  # one detection per cluster of survivor pixels
+                if used[k]:
+                    continue
+                near = np.linalg.norm(pts - pts[k], axis=1) < ASSOC_RADIUS
+                used |= near
+                self._associate(pts[near].mean(axis=0), float(dist[near].min()), pkts[b].drone, t)
 
-    def _clear_ahead(self, r: DroneRecord, t_cap: float, t: float, rot, depth) -> None:
+    def close(self) -> None:
+        self._fuse_stop.set()
+        if self.smoother is not None:
+            self.smoother.close()
+        self.surface.close()
+
+    def _note_clear(self, r: DroneRecord, t_cap: float, t: float, rot, clear: float) -> None:
         """Nearest obstacle straight ahead in this frame (drift-immune: it is measured from the
         drone), and the emergency brake: if the drone cannot stop in what it shows, centre the
         sticks now rather than at the next control tick."""
-        if self._az is None:
-            self._az, self._el = ray_angles(self.map.k.body_rays)
-        if self._cone is None:
-            self._cone = (np.abs(self._az) < 0.26) & (np.abs(self._el) < 0.2)
-        d = depth.reshape(-1)[self._cone]
-        d = d[d > 0]
-        r.fresh_t, r.fresh_clear = t_cap, float(d.min()) if len(d) else 12.0
+        r.fresh_t, r.fresh_clear = t_cap, clear
         heading = rot[:, 0]
         vf = max(0.0, float(r.vel[0] * heading[0] + r.vel[1] * heading[1]))
         if vf > 0.3 and r.fresh_clear < vf * LATENCY_S + vf * vf / (2 * DECEL) + 0.5 and r.mode not in (TAKEOFF, LANDING):
@@ -547,6 +693,7 @@ class MasterController:
         self.tick += 1
         self._smooth()
         self.link.refresh(self.interior)
+        self.link.update_coverage(self._nodes_plan, t)
         self._build_nav(t)
         self._update_envelope(t)
         self._detect_entries(t)
@@ -564,6 +711,11 @@ class MasterController:
 
     def _smooth(self) -> None:
         """Merge the smoothing worker's last batch and hand it the next one."""
+        if self.core is not None:  # the core smooths on the device: ~1 ms for thousands of points
+            self.map.smooth_step(SMOOTH_BATCH)
+            if self.tick % 10 == 0:
+                self.map.redirty_hidden()
+            return
         res = self.smoother.poll()
         if res is not None:
             self.map.apply_smoothing(*res)
@@ -576,7 +728,7 @@ class MasterController:
 
     def control(self, t: float) -> list[tuple[int, StickCommand]]:
         """Stick commands for every drone the master can still reach (run at telemetry rate)."""
-        out = []
+        cmds: list[tuple[DroneRecord, StickCommand]] = []
         for r in self.drones:
             if r.crashed or self.lost(r, t) or r.last_seen < 0:
                 continue
@@ -590,6 +742,11 @@ class MasterController:
                 cmd = self.pilot.command(r, idle, r.mode == LANDING)
             cmd.retreat = r.mode in (RTB, LANDING, TAKEOFF) or r.reeling
             cmd.cam = "nav" if r.mode == RELAY else "full"
+            cmds.append((r, cmd))
+        # link margin for every drone that needs a fresh look, in one GPU query
+        self._leash_prepare([(r, c) for r, c in cmds if r.mode not in (RTB, LANDING, TAKEOFF, RELAY)], t)
+        out = []
+        for r, cmd in cmds:
             if r.mode not in (RTB, LANDING, TAKEOFF, RELAY):
                 cmd = self._leash(r, cmd, t)
                 if cmd.mode == "fly" and not cmd.retreat:  # back-pressure: let the buffer drain
@@ -599,6 +756,54 @@ class MasterController:
             out.append((r.id, cmd))
             self._watch_stuck(r, cmd, t)
         return out
+
+    def _cmd_velocity(self, r: DroneRecord, cmd: StickCommand):
+        if cmd.mode != "fly" or cmd.retreat or r.grounded:
+            return None
+        c, s = np.cos(r.yaw), np.sin(r.yaw)
+        v = np.array([c * cmd.vx - s * cmd.vy, s * cmd.vx + c * cmd.vy, cmd.vz])
+        sp = float(np.linalg.norm(v))
+        return (v, sp) if sp >= 0.1 else None
+
+    def _leash_prepare(self, items: list, t: float) -> None:
+        """Predicted link margin now and LEASH_TAU s ahead for every drone whose cached value is
+        stale, from one batched query (3 nearest backbone nodes + the parent link)."""
+        need = []
+        for r, cmd in items:
+            vs = self._cmd_velocity(r, cmd)
+            if vs is None:
+                continue
+            v, sp = vs
+            d = v / sp
+            if r.leash_dir is None or t - r.leash_t >= 0.25 or float(np.dot(r.leash_dir, d)) < 0.9:
+                need.append((r, v, d))
+        if not need:
+            return
+        A, Bp, rows = [], [], []
+        for r, v, d in need:
+            nodes = sorted(self._nodes_plan, key=lambda n: float(np.linalg.norm(n - r.pos)))[:3]
+            pp = None
+            if r.parent_snr > -50 and r.parent != -2:
+                pp = self.base if r.parent == -1 else self.drones[r.parent].pos
+            start = len(A)
+            for n in nodes:
+                A += [r.pos, r.pos + v * LEASH_TAU]
+                Bp += [n, n]
+            if pp is not None:
+                A.append(r.pos)
+                Bp.append(pp)
+            rows.append((start, len(nodes), pp is not None))
+        s = self.link.snr_many(np.asarray(A), np.asarray(Bp))
+        for (r, v, d), (start, nn, has_pp) in zip(need, rows):
+            seg = s[start:start + 2 * nn].reshape(nn, 2)
+            now, ahead = float(seg[:, 0].max()), float(seg[:, 1].max())
+            corr = float(np.clip(r.parent_snr - s[start + 2 * nn], -12.0, 12.0)) if has_pp else 0.0
+            ahead += corr
+            k = 1.0
+            if ahead < M_MIN and ahead < now + corr:
+                k = float(np.clip((ahead - M_HOLD) / (M_MIN - M_HOLD), 0.0, 1.0))
+                self._need(("leash", r.id), r.pos + v * LEASH_TAU, t)
+            r.leash_k, r.leash_t, r.leash_dir = k, t, d
 
     def _servo_command(self, r: DroneRecord, t: float) -> StickCommand:
         """Sticks that steer on the opening seen in the drone's own latest frame."""
@@ -1554,6 +1759,7 @@ class MasterController:
         # tasks may be admitted around a post whose relay is already on its way
         self._nodes_plan = self._nodes + [sl["pos"] for sl in self.slots
                                           if sl["drone"] is not None and not sl["on_station"]]
+        self.link.update_coverage(self._nodes_plan, t)
 
         # coverage gaps: plan the relay chain for the most urgent unmet demand
         planned = 0
@@ -1638,34 +1844,13 @@ class MasterController:
                 r.hold_since, r.reeling = None, False
 
     def _leash(self, r: DroneRecord, cmd: StickCommand, t: float) -> StickCommand:
-        """Control barrier on link margin: never ask a drone to go where its link would fall
-        below M_HOLD. Looks LEASH_TAU seconds ahead along the commanded velocity, slows the
-        command as the predicted margin shrinks and stops it at M_HOLD, and records where
-        coverage is wanted. Margin is judged against the backbone (base + relay posts, those on
-        station and those on their way), not against whichever scanner the mesh happens to
-        route through. The drone's own reflex does the same from its measurement; this is the
-        predictive half. Recomputed at 4 Hz per drone and reused in between."""
-        if cmd.mode != "fly" or cmd.retreat or r.grounded:
+        """Control barrier on link margin (values from `_leash_prepare`): never ask a drone to go
+        where its link would fall below M_HOLD; slows the command as the predicted margin
+        shrinks. Margin is judged against the backbone (base + relay posts, on station or on
+        their way), not against whichever scanner the mesh routes through. The drone's own
+        reflex does the same from its measurement; this is the predictive half."""
+        if self._cmd_velocity(r, cmd) is None:
             return cmd
-        c, s = np.cos(r.yaw), np.sin(r.yaw)
-        v = np.array([c * cmd.vx - s * cmd.vy, s * cmd.vx + c * cmd.vy, cmd.vz])
-        sp = float(np.linalg.norm(v))
-        if sp < 0.1:
-            return cmd
-        d = v / sp
-        if r.leash_dir is None or t - r.leash_t >= 0.25 or float(np.dot(r.leash_dir, d)) < 0.9:
-            nodes = sorted(self._nodes_plan, key=lambda n: float(np.linalg.norm(n - r.pos)))[:3]
-            now = max(self.link.snr(r.pos, n) for n in nodes)
-            corr = 0.0
-            if r.parent_snr > -50 and r.parent != -2:  # what the map does not know about this drone's links
-                pp = self.base if r.parent == -1 else self.drones[r.parent].pos
-                corr = float(np.clip(r.parent_snr - self.link.snr(r.pos, pp), -12.0, 12.0))
-            ahead = max(self.link.snr(r.pos + v * LEASH_TAU, n) for n in nodes) + corr
-            k = 1.0
-            if ahead < M_MIN and ahead < now + corr:
-                k = float(np.clip((ahead - M_HOLD) / (M_MIN - M_HOLD), 0.0, 1.0))
-                self._need(("leash", r.id), r.pos + v * LEASH_TAU, t)
-            r.leash_k, r.leash_t, r.leash_dir = k, t, d
         k = r.leash_k
         if k < 1.0:
             cmd.vx, cmd.vy, cmd.vz = cmd.vx * k, cmd.vy * k, cmd.vz * k

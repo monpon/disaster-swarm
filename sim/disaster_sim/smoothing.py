@@ -90,10 +90,10 @@ def smooth_torch(pos, valid, w, torch, device) -> dict:
         mu = sd = torch.zeros((), device=device)
     outlier = (cnt < MIN_NBRS) | (md > mu + OUTLIER_SIGMAS * sd)
     return {
-        "spos": (c0 + move).cpu().numpy(),
-        "normal": torch.where(planar[:, None], normal, torch.zeros_like(normal)).cpu().numpy(),
-        "resid": lam[:, 0].clamp_min(0).sqrt().cpu().numpy(),
-        "outlier": outlier.cpu().numpy(),
+        "spos": c0 + move,
+        "normal": torch.where(planar[:, None], normal, torch.zeros_like(normal)),
+        "resid": lam[:, 0].clamp_min(0).sqrt(),
+        "outlier": outlier,
     }
 
 
@@ -101,18 +101,11 @@ class Smoother:
     """Background worker. `submit` a job (from `VoxelMap.smooth_job`), `poll` for its result."""
 
     def __init__(self, backend: str = "auto"):
-        self.torch = None
-        self.device = None
-        self.backend = "numpy"
-        if backend in ("auto", "torch", "cuda"):
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    self.torch, self.device, self.backend = torch, torch.device("cuda"), "cuda"
-                elif backend == "torch":
-                    self.torch, self.device, self.backend = torch, torch.device("cpu"), "torch-cpu"
-            except ImportError:
-                pass
+        import torch
+        from .gpu import DEV
+        self.torch, self.device = torch, DEV
+        self.backend = "cuda" if DEV.type == "cuda" else "torch-cpu"
+        self.stream = torch.cuda.Stream() if DEV.type == "cuda" else None
         self.jobs: queue.Queue = queue.Queue(maxsize=1)
         self.results: queue.Queue = queue.Queue()
         self.busy = False
@@ -149,10 +142,13 @@ class Smoother:
                 return
             t0 = time.perf_counter()
             try:
-                if self.torch is not None:
-                    out = smooth_torch(job["pos"], job["valid"], job["w"], self.torch, self.device)
+                if self.stream is not None:
+                    self.stream.wait_stream(self.torch.cuda.default_stream())  # the job was built on the main stream
+                    with self.torch.cuda.stream(self.stream):
+                        out = smooth_torch(job["pos"], job["valid"], job["w"], self.torch, self.device)
+                    self.stream.synchronize()
                 else:
-                    out = smooth_numpy(job["pos"], job["valid"], job["w"])
+                    out = smooth_torch(job["pos"], job["valid"], job["w"], self.torch, self.device)
                 self.results.put((job, out))
                 self.points_done += len(job["ids"])
             except Exception as e:  # never take the sim down; report and carry on

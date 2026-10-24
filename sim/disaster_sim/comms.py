@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import materials as Mat
-from .radio import GLASS_DB, GROUND_DB, NOISE_DBM, SLAB_DB, THICK_DB_PER_M, TX_DBM, WALL_DB, path_loss_db
+import torch
+
+from .gcomms import CoverageField, World, snr_pairs
+from .gpu import DEV
 from .voxelmap import FREE_T, OCC_T, VoxelMap
 
 M_HOLD = 12.0  # below this a drone stops (1.5 Mbps tier)
@@ -22,53 +24,40 @@ M_MIN = 16.0  # planned positions must predict at least this much
 
 
 class LinkModel:
-    """Predicted SNR between two points from the master's map (walls = occupied runs)."""
+    """Predicted SNR from the master's map (walls = occupied runs), computed on the GPU: pairwise
+    queries in batches, and a coverage field over the whole site for 'is this place covered'."""
 
-    def __init__(self, vmap: VoxelMap, interior_flat=lambda: None):
+    def __init__(self, vmap: VoxelMap):
         self.map = vmap
-        self.occ = np.zeros(vmap.n, dtype=bool)
-        self.unknown_in = np.zeros(vmap.n, dtype=bool)
-        self._cache: dict = {}
+        self.world: World | None = None
+        self.field = CoverageField(vmap.shape)
+        self._interior_id = None
+        self._interior_t = None
 
     def refresh(self, interior: np.ndarray) -> None:
-        """Snapshot the map (call once per master tick)."""
-        lo = self.map.lo
-        self.occ = lo >= OCC_T
-        self.unknown_in = (lo > FREE_T) & (lo < OCC_T) & interior.reshape(-1)
-        self._cache.clear()
+        """Snapshot the map (call once per master tick): no copy, the tensors are the map's."""
+        m = self.map
+        if self._interior_id is not id(interior):
+            self._interior_t = torch.as_tensor(interior.reshape(-1), device=DEV)
+            self._interior_id = id(interior)
+        unk = (m.g_lo > FREE_T) & (m.g_lo < OCC_T) & self._interior_t
+        self.world = World(m.shape, m.g_lo >= OCC_T, m.g_mat, unk)
+
+    def snr_many(self, a, b) -> np.ndarray:
+        """SNR (dB) for P pairs of points (numpy (P,3) each)."""
+        ta = torch.as_tensor(np.asarray(a, dtype=np.float32), device=DEV).reshape(-1, 3)
+        tb = torch.as_tensor(np.asarray(b, dtype=np.float32), device=DEV).reshape(-1, 3)
+        return snr_pairs(self.world, ta, tb).cpu().numpy()
 
     def snr(self, a: np.ndarray, b: np.ndarray) -> float:
-        d = float(np.linalg.norm(b - a))
-        n = max(int(d / 0.5), 1)
-        pts = a[None, :] + (b - a)[None, :] * (np.arange(n) + 0.5)[:, None] / n
-        flat, inside = self.map.flat_of(pts)
-        occ = self.occ[flat] & inside
-        unk = self.unknown_in[flat] & inside
-        edges = np.flatnonzero(np.diff(np.concatenate([[0], occ.astype(np.int8), [0]])))
-        loss = 0.0
-        for s, e in zip(edges[::2], edges[1::2]):
-            m = int(np.bincount(self.map.mat[flat[s:e]], minlength=Mat.N_MATERIALS).argmax())
-            if m == Mat.ASPHALT:  # the ground
-                per = GROUND_DB
-            elif m == Mat.GLASS:
-                per = GLASS_DB
-            elif m in (Mat.FLOOR, Mat.ROOF):
-                per = SLAB_DB
-            else:
-                per = WALL_DB
-            loss += per + THICK_DB_PER_M * max(0.0, (e - s) * 0.5 - 1.5)
-        loss += 0.2 * unk.sum()  # unexplored interior is assumed to have walls in it
-        return float(TX_DBM - path_loss_db(np.array(d)) - loss - NOISE_DBM)
+        return float(self.snr_many(np.asarray(a)[None, :], np.asarray(b)[None, :])[0])
 
-    def margin_at(self, p: np.ndarray, nodes: list[np.ndarray]) -> float:
-        """Best predicted SNR from any backbone node to point p (cached per 2 m cell)."""
-        key = tuple(np.floor(p / 2.0).astype(int))
-        hit = self._cache.get(key)
-        if hit is not None:
-            return hit
-        best = max((self.snr(np.asarray(n, dtype=float), p) for n in nodes), default=-100.0)
-        self._cache[key] = best
-        return best
+    def update_coverage(self, nodes: list[np.ndarray], now: float) -> None:
+        self.field.update(self.world, nodes, now)
+
+    def margin_at(self, p: np.ndarray, nodes=None) -> float:
+        """Predicted signal at p from the backbone nodes of the last `update_coverage`."""
+        return self.field.margin(np.asarray(p, dtype=float))
 
 
 def plan_chain(model: LinkModel, path: list, start: np.ndarray, target: np.ndarray, floor: float = M_MIN) -> list | None:
@@ -83,13 +72,14 @@ def plan_chain(model: LinkModel, path: list, start: np.ndarray, target: np.ndarr
         k = max(int(np.linalg.norm(b - a) / 2.0), 1)
         dense += [a + (b - a) * s / k for s in range(k)]
     dense.append(pts[-1])
+    dense = np.asarray(dense)
     relays, prev, i = [], np.asarray(start, dtype=float), 0
     while True:
-        if model.snr(prev, dense[-1]) >= floor:
+        s = model.snr_many(np.repeat(prev[None, :], len(dense) - i, 0), dense[i:])  # reach from prev to every later point
+        if s[-1] >= floor:
             return relays
-        j = i
-        while j + 1 < len(dense) and model.snr(prev, dense[j + 1]) >= floor:
-            j += 1
+        bad = np.flatnonzero(s[1:] < floor)  # the walk stops at the first point it cannot reach
+        j = i + (int(bad[0]) if len(bad) else len(s) - 1)
         if j == i:
             return None  # cannot bridge from here
         relays.append(dense[j])
