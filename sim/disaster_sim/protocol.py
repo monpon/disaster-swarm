@@ -32,10 +32,18 @@ def world_message(sim: Simulation) -> dict:
 class MapStream:
     """Cursor into the master's map for the shared broadcast: what viewers already have."""
 
+    MAX_POINT_UPDATES = 4000  # per broadcast; the rest follows on later ones
+    CANDIDATES = 40000
+    MIN_MOVE = 0.04  # m
+
     def __init__(self, sim: Simulation):
         self.sim = sim
         self.tick = -1
-        self.pts_sent = 0
+        self.sent_ver = np.zeros(0, dtype=np.int64)  # per point: version the viewers have (-1 = never sent)
+        self.sent_raw = np.zeros((0, 3), np.float32)
+        self.sent_sm = np.zeros((0, 3), np.float32)
+        self.sent_hid = np.zeros(0, bool)
+        self.sent_chunks: dict[int, int] = {}
         self.seen_sent = sim.master.map.seen.copy()
 
     def deltas(self, full: bool = False) -> dict:
@@ -46,13 +54,50 @@ class MapStream:
             self.tick = self.sim.master.tick
         o = np.flatnonzero(occ)
         free = idx[~occ] if not full else np.zeros(0, dtype=np.int64)  # a new client starts empty
-        p0, p1 = (0 if full else self.pts_sent), m.npts
-        if not full:
-            self.pts_sent = p1
+        n = m.npts
+        if len(self.sent_ver) < n:
+            grow = max(n, 2 * len(self.sent_ver)) - len(self.sent_ver)
+            self.sent_ver = np.r_[self.sent_ver, np.full(grow, -1)]
+            self.sent_raw = np.r_[self.sent_raw, np.zeros((grow, 3), np.float32)]
+            self.sent_sm = np.r_[self.sent_sm, np.zeros((grow, 3), np.float32)]
+            self.sent_hid = np.r_[self.sent_hid, np.zeros(grow, bool)]
+        if full:
+            ids = np.arange(n)
+        else:
+            cand = np.flatnonzero(self.sent_ver[:n] != m.pver[:n].astype(np.int64))[:self.CANDIDATES]
+            # Only changes a viewer could see: new points, moves over 4 cm, hidden/shown flips.
+            moved = (np.abs(m.praw[cand] - self.sent_raw[cand]).max(1) > self.MIN_MOVE) \
+                | (np.abs(m.spos[cand] - self.sent_sm[cand]).max(1) > self.MIN_MOVE) \
+                | (m.hidden(cand) != self.sent_hid[cand]) | (self.sent_ver[cand] < 0)
+            self.sent_ver[cand[~moved]] = m.pver[cand[~moved]]  # nothing to show: considered synced
+            ids = cand[moved][:self.MAX_POINT_UPDATES]
+        self.sent_ver[ids] = m.pver[ids]
+        self.sent_raw[ids], self.sent_sm[ids], self.sent_hid[ids] = m.praw[ids], m.spos[ids], m.hidden(ids)
+        conf = np.minimum(m.nview[ids] // 2, 3).astype(np.uint8)  # confidence bucket 0..3 from views
+        flag = m.hidden(ids).astype(np.uint8) | (conf << 1)
+        unit = 0.05
         return {"idx": b64(idx[o], "<i4"), "mat": b64(mat[o], "u1"), "rgb": b64(rgb[o], "<u2"),
                 "q": b64(q[o], "u1"), "free": b64(free, "<i4"), "n": int(len(o)),
-                "pts": b64(m.pts[p0:p1], "<u2"), "pcol": b64(m.pcol[p0:p1], "u1"), "np": int(p1 - p0),
-                "ptotal": int(p1)}
+                "uidx": b64(ids, "<u4"), "upos": b64(np.rint(m.praw[ids] / unit), "<u2"),
+                "uspos": b64(np.rint(np.clip(m.spos[ids], 0, 3200) / unit), "<u2"),
+                "ucol": b64(m.pcol[ids], "u1"), "uflag": b64(flag, "u1"),
+                "uresid": b64(np.minimum(np.rint(m.presid[ids] * 255), 255), "u1"),
+                "unpass": b64(m.npass[m.flat_of(m.praw[ids])[0]], "u1"),
+                "nu": int(len(ids)), "ptotal": int(n), "surf": self.surface(full)}
+
+    def surface(self, full: bool) -> list:
+        """Mesh chunks that changed (or all of them, for a new client). A chunk replaces the
+        previous mesh with the same id; zero vertices clears it."""
+        out = []
+        if full:
+            self.sent_chunks = {}
+        for cid, c in self.sim.master.surface.updates(self.sent_chunks, full, limit=3 if not full else 10 ** 9):
+            self.sent_chunks[cid] = c["ver"]
+            nv = len(c["v"]) // 3
+            wide = nv >= 65536
+            out.append({"id": int(cid), "nv": nv, "v": b64(c["v"], "<u2"), "c": b64(c["c"], "u1"),
+                        "f": b64(c["f"], "<u4" if wide else "<u2"), "w": bool(wide)})
+        return out
 
     def seen(self, full: bool = False) -> dict:
         """Proper-scan times of surfaces re-scanned since the last broadcast (or all, if full)."""

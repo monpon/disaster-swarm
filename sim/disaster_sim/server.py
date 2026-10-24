@@ -10,7 +10,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Request, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from .config import SimConfig
@@ -155,6 +155,13 @@ async def ws_endpoint(ws: WebSocket) -> None:
         pass
     finally:
         server.clients.pop(ws, None)
+
+
+@app.post("/clienterr")
+async def client_error(request: Request) -> dict:
+    """Browser-side errors and diagnostics, so a blank viewer can be debugged from the server log."""
+    print("CLIENT:", (await request.body()).decode("utf8", "replace")[:2000], flush=True)
+    return {"ok": True}
 
 
 _dist = Path(__file__).resolve().parents[2] / "ui" / "dist"

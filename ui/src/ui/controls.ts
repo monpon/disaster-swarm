@@ -13,6 +13,8 @@ export interface ViewSettings extends Layers {
   staleAfter: number;
   droneScale: number;
   pointSize: number;
+  smoothed: boolean;
+  mapRender: "auto" | "points" | "surface" | "both";
   links: boolean;
   mesh: boolean;
   shell: boolean;
@@ -36,6 +38,8 @@ export class ControlPanel {
     staleAfter: 120,
     droneScale: 2.5,
     pointSize: 0.3,
+    smoothed: true,
+    mapRender: "auto",
     paths: true,
     frustums: true,
     frustumDepth: 5,
@@ -53,7 +57,7 @@ export class ControlPanel {
     seed: 1,
     n_drones: 16,
     n_survivors: 20,
-    battery_wh: 20,
+    battery_wh: 2,
     wind_speed: 2,
     wind_dir_deg: 30,
     gust_strength: 0.8,
@@ -97,10 +101,14 @@ export class ControlPanel {
     const vw = this.gui.addFolder("View");
     vw.add(this.view, "view", { "Real building": "real", "Master map": "map", "Split": "split" }).name("view (Tab)").onChange(emit);
     this.floorCtrl = vw.add(this.view, "floor", ["all", "roof off", "F1", "F2", "F3"]).name("cutaway (F)").onChange(emit);
-    vw.add(this.view, "mapColor", { "Texture (observed color)": "texture", "Scan quality": "quality", "Freshness": "freshness" })
+    vw.add(this.view, "mapColor", { "Texture (observed color)": "texture", "Scan quality": "quality", "Freshness": "freshness", "Confidence (passes / roughness)": "confidence" })
       .name("map coloring (C)")
       .onChange(emit);
     vw.add(this.view, "staleAfter", 15, 600, 5).name("stale after (s)").onChange(emit);
+    vw.add(this.view, "mapRender", { "Auto (surface when available)": "auto", "Points": "points", "Surface": "surface", "Surface + points": "both" })
+      .name("map render")
+      .onChange(emit);
+    vw.add(this.view, "smoothed").name("smoothed cloud (off = raw)").onChange(emit);
     vw.add(this.view, "pointSize", 0.05, 1, 0.05).name("map point size (m)").onChange(emit);
     vw.add(this.view, "droneScale", 1, 8, 0.5).name("drone scale").onChange(emit);
     vw.add(this.view, "frustums").name("camera frustums").onChange(emit);

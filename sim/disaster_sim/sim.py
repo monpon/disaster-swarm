@@ -29,6 +29,9 @@ class Simulation:
         if cfg is not None:
             self.cfg = cfg
         cfg = self.cfg
+        if hasattr(self, "master"):
+            self.master.smoother.close()
+            self.master.surface.close()
         self.rng = np.random.default_rng(cfg.seed + 1000)
         self.b = generate_building(cfg)
         n = cfg.n_drones
@@ -39,7 +42,8 @@ class Simulation:
         self.esp = EspFleet(n, self.rng)
         self.camera = RGBDCamera(self.b, cfg, self.rng)
         self.radio = Radio(self.b, cfg, self.rng)
-        self.master = MasterController(cfg, self.b.vox.shape, (self.b.x0, self.b.y0, self.b.x1, self.b.y1, self.b.top),
+        self.master = MasterController(cfg, self.b.vox.shape,
+                                       (self.b.x0, self.b.y0, self.b.x1, self.b.y1, self.b.top) if cfg.known_outline else None,
                                        self.pads, self.b.base, np.random.default_rng(cfg.seed + 2000))
         self.last_frames: list = [None] * n  # most recent frame the master received per drone
         self.backlog = [deque() for _ in range(n)]  # frames waiting for radio capacity
@@ -52,6 +56,8 @@ class Simulation:
         self.wind_mean = cfg.wind_speed * np.array([np.cos(ang), np.sin(ang), 0.0])
         self.history: list[tuple] = []  # (t, explored, scanned, survivors)
         self._truth_cache = None
+        self.map_error_cache: dict = {}
+        self._err_rng = np.random.default_rng(cfg.seed + 3000)
 
     def _every(self, hz: float) -> bool:
         return self.tick % max(1, round(self.cfg.physics_hz / hz)) == 0
@@ -105,6 +111,8 @@ class Simulation:
         self.esp.sample(f, dt)
         self.tick += 1
         self.t += dt
+        if self._every(0.5):
+            self.map_error_cache = self.map_error()
         if self._every(1):
             m = self.coverage()
             self.history.append((round(self.t, 1), m["explored"], m["scanned"], self.confirmed_count()))
@@ -126,7 +134,9 @@ class Simulation:
             from scipy import ndimage
             v = self.b.vox
             air = v == M.AIR
-            interior = self.master.interior
+            b = self.b  # scored against the true building, whatever the master believes
+            interior = np.zeros(v.shape, dtype=bool)
+            interior[b.x0 + 1:b.x1 - 1, b.y0 + 1:b.y1 - 1, 1:b.top] = True
             reach = ndimage.binary_dilation(air, ndimage.generate_binary_structure(3, 1))
             surface = (v != M.AIR) & interior & reach
             self._truth_cache = ((air & interior).reshape(-1), surface.reshape(-1))
@@ -138,6 +148,44 @@ class Simulation:
         explored = float((m.free & air).sum() / max(air.sum(), 1))
         scanned = float(((m.quality >= m.q.threshold) & surf).sum() / max(surf.sum(), 1))
         return {"explored": round(explored, 4), "scanned": round(scanned, 4)}
+
+    def map_error(self, n: int = 4000) -> dict:
+        """Distance of map points to the true surface (scoring only; the master never sees it).
+        Reported for the raw running-average cloud and for the smoothed one."""
+        m = self.master.map
+        if m.npts < 100:
+            return {}
+        ids = self._err_rng.choice(m.npts, min(n, m.npts), replace=False)
+        ids = ids[~m.hidden(ids)]
+        if len(ids) < 50:
+            return {}
+        v = self.b.vox
+        solid = v != M.AIR
+        sh = np.array(v.shape)
+        out = {}
+        for name, pos in (("raw", m.praw[ids]), ("smooth", m.spos[ids])):
+            c = np.floor(pos).astype(int)
+            offs = np.array([(a, b, d) for a in (-1, 0, 1) for b in (-1, 0, 1) for d in (-1, 0, 1)])
+            cells = c[:, None, :] + offs[None]
+            ok = ((cells >= 0) & (cells < sh)).all(-1)
+            cc = np.clip(cells, 0, sh - 1)
+            sol = solid[cc[..., 0], cc[..., 1], cc[..., 2]] & ok
+            air = ~solid[cc[..., 0], cc[..., 1], cc[..., 2]] & ok
+            lo, hi = cells.astype(float), cells + 1.0
+            gap = np.maximum(np.maximum(lo - pos[:, None], pos[:, None] - hi), 0.0)
+            dist = np.linalg.norm(gap, axis=-1)
+            inside = solid[np.clip(c[:, 0], 0, sh[0] - 1), np.clip(c[:, 1], 0, sh[1] - 1), np.clip(c[:, 2], 0, sh[2] - 1)]
+            # in solid: distance to the nearest air cell; in air: to the nearest solid cell
+            d = np.where(inside, np.where(air, dist, 9.0).min(1), np.where(sol, dist, 9.0).min(1))
+            d = np.minimum(d, 1.0)
+            out[name] = (round(float(np.sqrt(np.mean(d ** 2))), 3), round(float((d < 0.10).mean()), 3))
+        return {"rms_raw": out["raw"][0], "ok_raw": out["raw"][1], "rms_smooth": out["smooth"][0],
+                "ok_smooth": out["smooth"][1]}
+
+    def verified_fraction(self) -> float:
+        air, surf = self._truth()
+        m = self.master.map
+        return round(float(((m.npass >= 2) & surf).sum() / max(surf.sum(), 1)), 4)
 
     def confirmed_count(self) -> int:
         return sum(c.confirmed for c in self.master.candidates)
@@ -173,6 +221,17 @@ class Simulation:
             "radio_mb": round(self.radio.stats["bytes"] / 1e6, 2),
             "mapped_voxels": int(self.master.map.occupied.sum()),
             "wind": [round(float(v), 2) for v in (self.wind_mean + self.gust)[:2]],
+            "verified": self.verified_fraction(),
+            "align_ok": round(self.master.map.align_ok / max(self.master.map.align_n, 1), 3),
+            "align_mm": round(1000 * float(np.mean(self.master.align_dp or [0.0])), 0),
+            "points": int(self.master.map.npts),
+            "smoother": self.master.smoother.backend,
+            "mesh": {"backend": self.master.surface.backend,
+                     "tris": int(self.master.surface.tris) if self.master.surface.available else 0,
+                     "chunks": len(self.master.surface.chunks) if self.master.surface.available else 0,
+                     "ms": round(self.master.surface.last_ms, 1) if self.master.surface.available else 0.0},
+            "smooth_ms": round(self.master.smoother.last_ms, 1),
+            **self.map_error_cache,
             "drift": round(float(np.mean([self.master.vio.drift(i) for i in range(f.n)
                                           if not f.grounded[i] and not f.crashed[i]] or [0.0])), 2),
         }

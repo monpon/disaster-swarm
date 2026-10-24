@@ -32,6 +32,29 @@ map.renderer.shadowMap.enabled = false;
 
 const realView = new RealView();
 const mapView = new MapView();
+
+/** Surface any failure on the page and report it to the server log. */
+function report(text: string): void {
+  try {
+    navigator.sendBeacon("/clienterr", text);
+  } catch {
+    /* ignore */
+  }
+}
+window.addEventListener("error", (e) => {
+  report(`error: ${e.message} @ ${e.filename}:${e.lineno}`);
+  let b = document.getElementById("err-banner");
+  if (!b) {
+    b = document.createElement("div");
+    b.id = "err-banner";
+    b.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:99;background:#7a1a22;color:#fff;padding:6px 10px;font:12px monospace";
+    document.body.appendChild(b);
+  }
+  b.textContent = `Viewer error: ${e.message}`;
+});
+window.addEventListener("unhandledrejection", (e) => report(`rejection: ${String(e.reason?.stack ?? e.reason)}`));
+let nMsgs = 0;
+setInterval(() => report(`diag: msgs=${nMsgs} cloud=${mapView.cloud?.count ?? "none"} view=${new URLSearchParams(location.search).toString()}`), 10000);
 const swarmReal = new SwarmView();
 const swarmMap = new SwarmView();
 const commsReal = new CommsLayer();
@@ -103,6 +126,8 @@ function applyView(v: ViewSettings): void {
   realView.layer?.setClip(planes);
   mapView.setClip(planes);
   mapView.setPointSize(v.pointSize);
+  mapView.setSmoothed(v.smoothed);
+  mapView.setRender(v.mapRender);
   document.getElementById("cut-label")!.textContent = v.floor === "all" ? "" : `cutaway: ${v.floor}`;
   for (const s of [swarmReal, swarmMap]) s.setScale(v.droneScale);
   for (const c of [commsReal, commsMap]) {
@@ -169,6 +194,7 @@ async function onWorld(b: BuildingInfo, cfg: SimConfig): Promise<void> {
 }
 
 function handleState(msg: StateMessage | SnapshotMessage): void {
+  nMsgs++;
   if (msg.type === "snapshot") {
     chart.reset(msg.history);
     applyState(msg);
@@ -224,7 +250,7 @@ window.addEventListener("keydown", (e) => {
     const floors = building ? Array.from({ length: building.floors }, (_, i) => `F${i + 1}`) : [];
     panel.cycle("floor", ["all", "roof off", ...floors.reverse()]);
   } else if (e.key === "c" || e.key === "C") {
-    panel.cycle("mapColor", ["texture", "quality", "freshness"]);
+    panel.cycle("mapColor", ["texture", "quality", "freshness", "confidence"]);
   } else if (e.key === "Escape") {
     rig.unfollow();
   } else if (e.key === "o" || e.key === "O") {

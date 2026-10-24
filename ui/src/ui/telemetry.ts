@@ -17,9 +17,11 @@ function linkColor(mbps: number): string {
 }
 
 const PHASE_LABEL: Record<string, string> = {
+  scout: "0 · SCOUTING SITE",
   survey: "1 · EXTERIOR SURVEY",
   interior: "2 · INTERIOR SCAN",
-  complete: "3 · COMPLETE",
+  verify: "3 · VERIFY PASS",
+  complete: "4 · COMPLETE",
 };
 
 /** Header metrics, fleet table, selected-drone card and event log. */
@@ -45,6 +47,12 @@ export class Telemetry {
     $("m-lost").parentElement!.classList.toggle("alert", m.crashed > 0);
     const tot = m.frames_ok + m.frames_dropped;
     $("m-drift").textContent = `${m.drift.toFixed(2)} m`;
+    $("m-verified").textContent = `${(m.verified * 100).toFixed(1)}%`;
+    $("m-align").textContent = `${(m.align_ok * 100).toFixed(0)}% · ${m.align_mm.toFixed(0)} mm`;
+    $("m-error").textContent = m.rms_raw === undefined ? "-" :
+      `${(m.rms_raw * 100).toFixed(0)} → ${(m.rms_smooth! * 100).toFixed(0)} cm`;
+    $("m-smoother").textContent = `${m.smoother} · ${m.smooth_ms.toFixed(0)} ms` +
+      (m.mesh.backend === "off" ? "" : ` · mesh ${(m.mesh.tris / 1000).toFixed(0)}k tris`);
     $("m-link").textContent = `${m.radio_mb.toFixed(0)} MB · ${tot ? ((m.frames_dropped / tot) * 100).toFixed(1) : "0.0"}% lost`;
     $("m-rtf").textContent = m.running ? `${m.rtf.toFixed(1)}× (set ${m.speed}×)` : "paused";
     const done = m.phase === "complete";

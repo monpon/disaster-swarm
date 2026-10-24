@@ -55,11 +55,20 @@ class SimConfig:
     link_dropout: float = 0.02
 
     # Vehicle.
-    battery_wh: float = 20.0
+    battery_wh: float = 2.0  # ~8-10 min for a 150 g drone
     charge_time_s: float = 40.0
     rtb_reserve: float = 0.12
     max_speed: float = 6.0
     indoor_speed: float = 1.5
+
+    # What the master knows before launch: nothing about the building (it scouts for it). Set
+    # known_outline to hand it the footprint instead.
+    known_outline: bool = False
+    scout_alt: float = 6.0
+    scout_spacing: float = 16.0
+
+    # Multi-pass mapping.
+    verify_max_s: float = 240.0  # cap on the final verification sweep
 
     def to_dict(self) -> dict:
         return asdict(self)

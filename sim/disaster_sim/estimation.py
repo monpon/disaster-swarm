@@ -83,6 +83,11 @@ class SimulatedVIO:
             self.err_p[i] += (ke[:3] - self.err_p[i]) * LOOP_GAIN
             self.err_yaw[i] += (ke[3] - self.err_yaw[i]) * LOOP_GAIN
 
+    def correct(self, i: int, dp: np.ndarray, dyaw: float, gain: float = 0.3) -> None:
+        """A map-relative fix from the master (frame-to-map alignment): shift the estimate."""
+        self.err_p[i] += gain * np.asarray(dp)
+        self.err_yaw[i] += gain * dyaw
+
     def pose(self, i: int, truth: dict) -> tuple[np.ndarray, np.ndarray]:
         """Estimated (position, body-to-world rotation) for a truth pose of drone i."""
         p = np.asarray(truth["pos"], dtype=float) + self.err_p[i]

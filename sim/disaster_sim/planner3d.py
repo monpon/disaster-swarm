@@ -17,7 +17,7 @@ _MOVES = [(1, 0, 0, 1.0), (-1, 0, 0, 1.0), (0, 1, 0, 1.0), (0, -1, 0, 1.0),
           (0, 0, 1, 1.0), (0, 0, -1, 1.0)]
 NEAR_WALL_COST = 1.5
 HEURISTIC_WEIGHT = 1.5
-BODY_CLEARANCE = 0.55  # half-width checked along straight legs (0.32 m frame + tracking error)
+BODY_CLEARANCE = 0.40  # half-width checked along straight legs (0.21 m frame + tracking error)
 
 
 class NavGrid:

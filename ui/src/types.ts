@@ -95,7 +95,7 @@ export interface DroneState {
 
 export interface Metrics {
   t: number;
-  phase: "survey" | "interior" | "complete";
+  phase: "scout" | "survey" | "interior" | "verify" | "complete";
   explored: number;
   scanned: number;
   entries: number;
@@ -113,6 +113,17 @@ export interface Metrics {
   mapped_voxels: number;
   wind: [number, number];
   drift: number; // mean VIO position error of airborne drones (m)
+  verified: number; // fraction of interior surfaces seen from 2+ separate passes
+  align_ok: number; // fraction of frames the master registered against its map
+  align_mm: number; // mean size of that correction (mm)
+  points: number;
+  smoother: string; // "cuda" | "cpu"
+  smooth_ms: number;
+  mesh: { backend: string; tris: number; chunks: number; ms: number };
+  rms_raw?: number; // map error vs the true surface (scoring only), raw / smoothed
+  rms_smooth?: number;
+  ok_raw?: number; // fraction of points within 10 cm
+  ok_smooth?: number;
   running: boolean;
   speed: number;
   rtf: number;
@@ -151,10 +162,27 @@ export interface MapDeltas {
   q: string; // uint8 best scan quality * 255
   free: string; // int32 voxels now observed free
   n: number;
-  pts: string; // uint16 x,y,z in POINT_UNIT (5 cm) units, new points only
-  pcol: string; // uint8 r,g,b per new point
-  np: number;
+  // Point updates (new points and refined ones): id, raw and smoothed position in POINT_UNIT
+  // (5 cm) units, color, flags (bit0 hidden, bits1-2 confidence 0..3), roughness, pass count.
+  uidx: string;
+  upos: string;
+  uspos: string;
+  ucol: string;
+  uflag: string;
+  uresid: string;
+  unpass: string;
+  nu: number;
   ptotal: number;
+  surf: SurfaceChunk[]; // changed mesh chunks
+}
+
+export interface SurfaceChunk {
+  id: number;
+  nv: number; // vertices (0 clears the chunk)
+  v: string; // uint16 x,y,z in 1 cm units
+  c: string; // uint8 r,g,b per vertex
+  f: string; // triangle indices (uint16, or uint32 when `w`)
+  w: boolean;
 }
 
 export interface SeenDeltas {

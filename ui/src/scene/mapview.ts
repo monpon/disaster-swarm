@@ -3,8 +3,9 @@ import { CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 import { decodeB64, type BuildingInfo, type Candidate, type MapDeltas, type MapEntry, type SeenDeltas, type SimConfig } from "../types";
 import { siteDressing } from "./realview";
 import { PointCloud } from "./pointcloud";
+import { SurfaceLayer } from "./surface";
 
-export type ColorMode = "texture" | "quality" | "freshness";
+export type ColorMode = "texture" | "quality" | "freshness" | "confidence";
 
 const SEEN_UNITS_PER_S = 2; // must match sim/disaster_sim/protocol.py
 const MAX_TARGETS = 600;
@@ -34,6 +35,8 @@ function qualityColor(q: number, threshold: number, out: THREE.Color): THREE.Col
 export class MapView {
   readonly group = new THREE.Group();
   cloud: PointCloud | null = null;
+  readonly surf = new SurfaceLayer();
+  renderMode: "auto" | "points" | "surface" | "both" = "auto";
   pointSize = 0.3;
   private clip: THREE.Plane[] = [];
   mode: ColorMode = "texture";
@@ -63,7 +66,7 @@ export class MapView {
       new THREE.PointsMaterial({ size: 0.7, vertexColors: true, transparent: true, opacity: 0.85, depthWrite: false }),
     );
     this.targets.frustumCulled = false;
-    this.group.add(this.shell, this.targets, this.entryGroup, this.candGroup);
+    this.group.add(this.shell, this.targets, this.entryGroup, this.candGroup, this.surf.group);
   }
 
   build(b: BuildingInfo, cfg: SimConfig): void {
@@ -76,6 +79,8 @@ export class MapView {
     this.threshold = (cfg.cam_range - cfg.proper_scan_range) / (cfg.cam_range - near);
     this.cloud = new PointCloud(b.shape, this.pointSize);
     this.cloud.material.clippingPlanes = this.clip;
+    this.surf.material.clippingPlanes = this.clip;
+    this.surf.clear();
     this.group.add(this.cloud.points);
     this.dressing = siteDressing(b);
     this.group.add(this.dressing);
@@ -120,6 +125,23 @@ export class MapView {
     this.clip.push(...planes);
   }
 
+  /** Points, surfaces or both. "auto" shows the surface once the GX10 has produced one. */
+  setRender(mode: "auto" | "points" | "surface" | "both"): void {
+    this.renderMode = mode;
+    this.applyRender();
+  }
+
+  private applyRender(): void {
+    const hasSurf = this.surf.count > 0;
+    const m = this.renderMode === "auto" ? (hasSurf ? "surface" : "points") : this.renderMode;
+    this.surf.group.visible = m !== "points";
+    if (this.cloud) this.cloud.points.visible = m !== "surface";
+  }
+
+  setSmoothed(on: boolean): void {
+    this.cloud?.setSmoothed(on);
+  }
+
   setPointSize(size: number): void {
     this.pointSize = size;
     if (this.cloud) this.cloud.material.size = size;
@@ -136,9 +158,16 @@ export class MapView {
         this.q[idx[i]] = q[i];
       }
     }
-    if (m.np) {
-      this.cloud.append(new Uint16Array(decodeB64(m.pts)), new Uint8Array(decodeB64(m.pcol)));
-      if (this.mode !== "texture") this.recolor();
+    if (m.surf?.length) {
+      this.surf.apply(m.surf);
+      this.applyRender();
+    }
+    if (m.nu) {
+      this.cloud.update(
+        new Uint32Array(decodeB64(m.uidx)), new Uint16Array(decodeB64(m.upos)), new Uint16Array(decodeB64(m.uspos)),
+        new Uint8Array(decodeB64(m.ucol)), new Uint8Array(decodeB64(m.uflag)), new Uint8Array(decodeB64(m.uresid)),
+        new Uint8Array(decodeB64(m.unpass)),
+      );
     }
   }
 
@@ -146,9 +175,14 @@ export class MapView {
     if (this.mode === "texture") return null;
     const c = new THREE.Color();
     const now = this.now();
-    return (vox: number, _r: number, _g: number, _b: number, out: Uint8Array) => {
+    return (vox: number, _r: number, _g: number, _b: number, out: Uint8Array, i: number) => {
       if (this.mode === "quality") qualityColor(this.q[vox] / 255, this.threshold, c);
-      else {
+      else if (this.mode === "confidence") {
+        // green: seen from several passes and flat; red: one pass or rough (thick/doubled surface)
+        const k = this.cloud!.confidence(i);
+        const score = Math.min(1, (Math.min(k.passes, 3) / 3) * 0.6 + (k.views / 3) * 0.2 + 0.2 - Math.min(k.rough * 4, 0.6));
+        qualityColor(Math.max(score, 0), 0.5, c);
+      } else {
         const s = this.seen[vox];
         if (s === 0) c.copy(NEVER);
         else freshnessColor(now - (s - 1) / SEEN_UNITS_PER_S, this.staleAfter, c);

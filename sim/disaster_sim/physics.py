@@ -9,23 +9,23 @@ import numpy as np
 
 G = 9.81
 
-# Vehicle parameters (roughly a 1.5 kg, 500 mm-class quadrotor).
-MASS = 1.5
-ARM = 0.25
-INERTIA = np.array([0.029, 0.029, 0.055])
+# Vehicle parameters: a 30 x 30 x 15 cm, 150 g toy-class quadrotor.
+MASS = 0.15
+ARM = 0.11
+INERTIA = np.array([9e-4, 9e-4, 1.6e-3])
 THRUST_TO_WEIGHT = 2.4
 F_MAX = THRUST_TO_WEIGHT * MASS * G / 4  # per motor, N
-YAW_COEF = 0.016  # reaction torque per newton of thrust, N*m/N
+YAW_COEF = 0.008  # reaction torque per newton of thrust, N*m/N
 MOTOR_TAU = 0.03  # first-order motor response, s
-DRAG = 0.35  # linear aerodynamic drag, N/(m/s)
-PROP_RADIUS = 0.12
+DRAG = 0.035  # linear aerodynamic drag, N/(m/s)
+PROP_RADIUS = 0.065
 AIR_DENSITY = 1.225
 PROP_EFFICIENCY = 0.6
-AVIONICS_W = 10.0
-BODY_RADIUS = 0.32  # frame + prop guards
+AVIONICS_W = 4.0
+BODY_RADIUS = 0.21  # half-diagonal of the 30 cm square frame (prop guards included)
 BUMP_SPEED = 3.0  # m/s; slower contacts bounce off the prop guards
-BODY_PROBES = np.array([[BODY_RADIUS, 0, 0.05], [-BODY_RADIUS, 0, 0.05], [0, BODY_RADIUS, 0.05],
-                        [0, -BODY_RADIUS, 0.05], [0, 0, 0.18]])
+BODY_PROBES = np.array([[BODY_RADIUS, 0, 0.03], [-BODY_RADIUS, 0, 0.03], [0, BODY_RADIUS, 0.03],
+                        [0, -BODY_RADIUS, 0.03], [0, 0, 0.075]])
 
 # X configuration. Motor i at angle 45 + 90*i degrees, alternating spin.
 _ang = np.deg2rad(45 + 90 * np.arange(4))

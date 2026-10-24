@@ -12,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+gpu = ["torch", "scikit-image"]  # smoothing + surface fusion on a CUDA GPU (pip install torch --index-url https://download.pytorch.org/whl/cu130)
 
 [build-system]
 requires = ["setuptools>=68"]
