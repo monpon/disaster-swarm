@@ -244,6 +244,8 @@ class MasterController:
         self.entries: list[Entry] = []
         self._mesh_t = -1.0
         self.detector = PersonDetector() if (core is not None and getattr(cfg, "detector", False)) else None
+        self.person_search = True  # the console's detection settings (the "detection" command): look for people at all,
+        self.person_conf = 0.45    # and the detector confidence a person box needs
         self._det_t: dict[int, float] = {}
         self._dbg_n = 0
         self.suspects: list[dict] = []  # gaps in a wall that probably are not gaps: a drone goes to look
@@ -578,7 +580,7 @@ class MasterController:
             # People are found by the detector on the camera frames, at most twice a second per drone
             pick = [b for b, p in enumerate(pkts) if not p.thumb and not self.drones[p.drone].grounded
                     and p.t - self._det_t.get(p.drone, -1.0) >= 0.5]
-            if pick and not self.detector.busy and self.detector.ready:
+            if pick and self.person_search and not self.detector.busy and self.detector.ready:
                 frames = np.asarray(self.core.rgbs([int(pkts[b].slot) for b in pick])).reshape(len(pick), H, W, 3)
                 ctx = [{"drone": pkts[b].drone, "t": pkts[b].t, "pos": pos_c[b].copy(), "rot": rot_c[b].copy(),
                         "depth": est[b].reshape(H, W).copy(), "rgb": frames[i].copy() if os.environ.get("DISASTER_DET_DEBUG") else None}
@@ -779,7 +781,7 @@ class MasterController:
         for ctx_list, dets_list in self.detector.poll():
             for ctx, dets in zip(ctx_list, dets_list):
                 for x1, y1, x2, y2, conf, cls in dets:
-                    if int(cls) != PERSON or conf < 0.45:
+                    if int(cls) != PERSON or conf < self.person_conf:
                         continue
                     w, h = x2 - x1, y2 - y1
                     if w < 10 or h < 10:

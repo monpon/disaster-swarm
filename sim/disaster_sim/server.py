@@ -104,6 +104,12 @@ class SimServer:
         elif cmd == "step":
             with self.lock:
                 self.sim.advance(msg.get("seconds", 0.5))
+        elif cmd == "detection":   # the console's detection settings (web console, voice agent)
+            person = msg.get("person") or {}
+            with self.lock:
+                m = self.sim.master
+                m.person_search = bool(person.get("enabled", True))
+                m.person_conf = float(min(max(person.get("threshold", 0.45), 0.05), 0.95))
         elif cmd == "reset":
             with self.lock:
                 cfg = self.sim.cfg.updated(**msg.get("config", {}))

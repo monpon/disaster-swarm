@@ -4,36 +4,38 @@ import { Switch } from "@swarm/ui/components/switch";
 import { cn } from "@swarm/ui/lib/utils";
 import { createFileRoute } from "@tanstack/react-router";
 import { Cpu } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Select, Slider } from "@/components/form";
-import { detectionClasses } from "@/lib/mock";
+import { reviewOptions, setDetection, useDetection, type DetectionClass } from "@/lib/detection";
 
 export const Route = createFileRoute("/_app/settings/detection")({
   head: () => ({ meta: [{ title: "Settings: detection" }] }),
   component: DetectionSettings,
 });
 
-type ClassSetting = (typeof detectionClasses)[number];
-
 function DetectionSettings() {
-  const [classes, setClasses] = useState<ClassSetting[]>(detectionClasses);
-  const [vitals, setVitals] = useState(true);
-  const [review, setReview] = useState("0.80");
-  const update = (id: string, patch: Partial<ClassSetting>) => setClasses((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  // Saved settings are shared with the voice agent; this page edits a draft of them.
+  const saved = useDetection();
+  const [classes, setClasses] = useState<DetectionClass[]>(saved.classes);
+  const [vitals, setVitals] = useState(saved.vitals);
+  const [review, setReview] = useState(saved.review);
+  const update = (id: string, patch: Partial<DetectionClass>) => setClasses((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
 
   const dirty = useMemo(() => {
-    let n = classes.filter((c, i) => JSON.stringify(c) !== JSON.stringify(detectionClasses[i])).length;
-    if (!vitals) n++;
-    if (review !== "0.80") n++;
+    let n = classes.filter((c, i) => JSON.stringify(c) !== JSON.stringify(saved.classes[i])).length;
+    if (vitals !== saved.vitals) n++;
+    if (review !== saved.review) n++;
     return n;
-  }, [classes, vitals, review]);
+  }, [classes, vitals, review, saved]);
 
   const discard = () => {
-    setClasses(detectionClasses);
-    setVitals(true);
-    setReview("0.80");
+    setClasses(saved.classes);
+    setVitals(saved.vitals);
+    setReview(saved.review);
   };
+  // Saved settings change under the page when they load from storage or the voice agent changes them.
+  useEffect(discard, [saved]);
 
   return (
     <>
@@ -98,7 +100,7 @@ function DetectionSettings() {
             <p className="text-[13px] leading-[19px] text-muted">Low-confidence findings wait for the incident commander before they reach the crew.</p>
             <div className="flex items-center gap-3 pt-1 text-[13px]">
               <span className="flex-1">Review below</span>
-              <Select label="Review threshold" mono value={review} onChange={setReview} options={["0.60", "0.70", "0.80", "0.90"]} className="w-20" />
+              <Select label="Review threshold" mono value={review} onChange={setReview} options={reviewOptions} className="w-20" />
             </div>
           </div>
         </div>
@@ -106,12 +108,12 @@ function DetectionSettings() {
       <div className="flex h-16 shrink-0 items-center gap-2.5 border-t border-line bg-white px-8">
         {dirty > 0 && <span className="size-2 rounded-full bg-orange" />}
         <span className="flex-1 text-[13px] text-muted">
-          {dirty > 0 ? `${dirty} unsaved ${dirty === 1 ? "change" : "changes"}. Applies to new missions.` : "All changes saved."}
+          {dirty > 0 ? `${dirty} unsaved ${dirty === 1 ? "change" : "changes"}. Applies to the running search.` : "All changes saved."}
         </span>
         <Button onClick={discard} disabled={dirty === 0}>
           Discard
         </Button>
-        <Button variant="primary" disabled={dirty === 0}>
+        <Button variant="primary" disabled={dirty === 0} onClick={() => setDetection({ classes, vitals, review })}>
           Save changes
         </Button>
       </div>
