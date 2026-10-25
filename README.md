@@ -15,7 +15,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/uvicorn disaster_sim.server:app --port 8000
 
 # frontend
-cd ui
+cd ui/viewer
 npm install
 npm run build      # served by the backend at http://localhost:8000
 # or, for live-reload development:
@@ -65,4 +65,4 @@ scripts/stdb-up.sh publish    # re-publish the module after editing swarm_db/spa
 Needs the SpacetimeDB CLI (`curl -sSf https://install.spacetimedb.com | sh`) and the `wasm32-unknown-unknown` Rust target.
 Only the simulator's identity (its token is kept in `~/.swarm_stdb_token`) can write the state; viewers can only submit commands.
 `GET /stdb` shows the publisher's counters. Regenerate the viewer's bindings after changing the module:
-`spacetime generate --lang typescript --out-dir ui/src/db/bindings --module-path swarm_db/spacetimedb`.
+`spacetime generate --lang typescript --out-dir ui/viewer/src/db/bindings --module-path swarm_db/spacetimedb`.

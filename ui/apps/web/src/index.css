@@ -1,0 +1,36 @@
+@import "@swarm/ui/globals.css";
+
+@source "./**/*.{ts,tsx}";
+
+/* Range input: 4px track filled to --fill with --tone, white raised thumb. */
+.slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--tone) var(--fill), #e3e3e0 var(--fill));
+}
+.slider::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--tone) var(--fill), #e3e3e0 var(--fill));
+}
+.slider::-webkit-slider-thumb {
+  appearance: none;
+  margin-top: -6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    0 0 0 1px var(--color-line-strong),
+    0 1px 3px rgb(0 0 0 / 0.2);
+}
+.slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    0 0 0 1px var(--color-line-strong),
+    0 1px 3px rgb(0 0 0 / 0.2);
+}

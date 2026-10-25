@@ -287,6 +287,6 @@ async def client_error(request: Request) -> dict:
     return {"ok": True}
 
 
-_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
+_dist = Path(__file__).resolve().parents[2] / "ui" / "viewer" / "dist"
 if _dist.is_dir():
     app.mount("/", StaticFiles(directory=_dist, html=True), name="ui")
