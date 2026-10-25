@@ -36,16 +36,25 @@ python3 tools/sfx.py
 tools/.venv/bin/python tools/music.py
 tools/.venv/bin/python vo/scratch.py      # needs tools/voices/en_US-ryan-high.onnx
 # 4. Render (Chrome draws on the GPU via ANGLE, ffmpeg encodes with VAAPI)
-./render.sh
+./render.sh              # incremental: only parts whose inputs changed are re-rendered
+./render.sh --dry        # show which parts are cached
+./render.sh --force B    # re-render one part anyway
 ```
+
+Each part (A–D) is cached in `out/parts/` with a hash of what it uses: its source files
+(followed through imports), the `timeline.ts` values it imports, the media it references and
+the render settings. Untouched parts are reused as-is; the parts are joined, narration and music
+are mixed in with ffmpeg, and the result is encoded once with VAAPI. Changing `Root.tsx` or the
+`Full` composition does not affect the output of `render.sh` (it is only for Studio preview).
 
 `npm run studio` opens Remotion Studio for scrubbing.
 
-## Swapping in the real voiceover
+## Narration
 
-Record each line from `vo/script.json` (Part C lines included) at its `at` time, or record one take and
-align it in Studio. Then export it as `public/audio/vo.wav` (48 kHz, full length 210.8 s)
-and run `VO=1 ./render.sh`.
+- Parts A and B use the recorded narration, `vo/real/narration.m4a`. "Introducing SWARM" is cut out, loudness is normalized, and the result is saved as `public/audio/narration.wav`.
+- Part C uses the team's technical voiceover. `public/audio/partC.wav` is built from `vo/real/tech.mp3` (0.6–32 s) and the first two items of `vo/real/improvements.mp3`.
+- Scene timings come from word timestamps (`vo/transcribe.py`, `vo/transcribe2.py`, output in `vo/real/*words.json`).
+- `render.sh` mixes the narration in and ducks the music under it. `VO=0 ./render.sh` renders music only.
 
 ## Part C
 

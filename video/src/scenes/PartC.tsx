@@ -158,7 +158,7 @@ function Stack({ t }: { t: number }) {
           <OffthreadVideo src={staticFile("rec/sim_tl.mp4")} muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         ) : (
           <Sequence from={sec(c.map)} layout="none">
-            <OffthreadVideo src={staticFile("rec/floor.mp4")} startFrom={sec(1)} muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            <OffthreadVideo src={staticFile("rec/floor.mp4")} startFrom={sec(6)} muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           </Sequence>
         )}
       </Frame>

@@ -12,7 +12,7 @@ Built at Cal Hacks 13.0.
 
 - [Demo video](#demo-video)
 - [Why this matters](#the-need)
-- [What it does](#the-product)
+- [What it does](#the-product) and [screens](#screens)
 - [How it works](#system-architecture)
 - [What's real and what's simulated](#whats-real-and-whats-simulated)
 - [Competition](#competition) and [market](#market-fit)
@@ -28,7 +28,7 @@ Built at Cal Hacks 13.0.
 [![Watch the Mayfly demo](docs/media/thumbnail.jpg)](#demo-video)
 <!-- Replace #demo-video with the YouTube/Devpost link once uploaded. Source: video/ (Remotion). -->
 
-3½ minutes: the problem, the product, a live walkthrough of the console, the technical design, and what's next.
+Just under 4 minutes: the problem, the product, a live walkthrough of the console, the technical design, and what's next.
 
 ---
 
@@ -61,6 +61,50 @@ A rescue lead uses Mayfly from a browser:
 <p align="center"><img src="docs/media/survivor.jpg" alt="Survivor finding with snapshot and vitals in the live console" width="90%"></p>
 
 The console says what it can't do, too: cameras need light, so it's not for heavy smoke; pulse readings are estimates, not diagnoses; and the incident commander approves routes and can stop every drone.
+
+## Screens
+
+Web captures are from this branch at 1440 x 900 and 390 x 844, using the demo mission at 418 Elm St. Simulator and hardware shots come from the team's own recordings.
+
+### Console, desktop
+
+| New mission | Mission setup |
+| --- | --- |
+| <img src="docs/screenshots/desktop-new-mission.jpg" width="420" alt="Find the building and pick the incident type"> | <img src="docs/screenshots/desktop-setup.jpg" width="420" alt="Floor plan, geofence and four drones ready to launch"> |
+
+| Live mission | Fleet |
+| --- | --- |
+| <img src="docs/screenshots/desktop-live.jpg" width="420" alt="Shared 3D map, four drone feeds, findings and the crew channel"> | <img src="docs/screenshots/desktop-fleet.jpg" width="420" alt="Fleet page with a drone's camera, health and hardware profile"> |
+
+| Detection settings | Edge server |
+| --- | --- |
+| <img src="docs/screenshots/desktop-detection.jpg" width="420" alt="Detection classes, thresholds and what gets spoken to the crew"> | <img src="docs/screenshots/desktop-edge.jpg" width="420" alt="Edge server status and the services running on it"> |
+
+### Simulator and hardware
+
+| Simulator, split view | Console, 32-drone swarm |
+| --- | --- |
+| <img src="docs/screenshots/sim-split.jpg" width="420" alt="Simulator: the building on the left, the fused map with drone labels and planned paths on the right"> | <img src="docs/screenshots/console-swarm-map.jpg" width="420" alt="Console map with a 32-drone simulated swarm, entries and findings"> |
+
+| Drone camera in the console | Our drone |
+| --- | --- |
+| <img src="docs/screenshots/console-drone-camera.jpg" width="420" alt="A simulated drone's camera view, expanded in the console"> | <img src="docs/screenshots/hardware-drone.jpg" width="420" alt="The E58 quadcopter with the ESP32-S3 relay mounted on top"> |
+
+### Landing page, desktop
+
+| Hero | One drone vs. the swarm |
+| --- | --- |
+| <img src="docs/screenshots/desktop-landing.jpg" width="420" alt="Landing page hero with the console preview"> | <img src="docs/screenshots/desktop-race.jpg" width="420" alt="One drone and the swarm search the same house side by side"> |
+
+| One shared map | Checking on people |
+| --- | --- |
+| <img src="docs/screenshots/desktop-map-story.jpg" width="420" alt="The map story: findings, coverage and the crew's route"> | <img src="docs/screenshots/desktop-vitals.jpg" width="420" alt="Pulse read from the camera, shown as example output"> |
+
+### Landing page, phone
+
+| Hero | One vs. many | One map | Vitals |
+| --- | --- | --- | --- |
+| <img src="docs/screenshots/phone-landing.jpg" width="200" alt="Landing page hero on a phone"> | <img src="docs/screenshots/phone-race.jpg" width="200" alt="Race comparison on a phone"> | <img src="docs/screenshots/phone-map-story.jpg" width="200" alt="Map story on a phone"> | <img src="docs/screenshots/phone-vitals.jpg" width="200" alt="Vitals section on a phone"> |
 
 ## System architecture
 
@@ -174,6 +218,13 @@ The incumbents make excellent single aircraft: caged airframes that bounce off w
 
 ## Market fit
 
+| Market | 2026 | 2033 | Growth |
+|---|---|---|---|
+| Drone-as-first-responder | $3.5B | $11B | 17.7% a year, more than 3× |
+| Global drones | $96.4B | $182.4B | ~1.9× |
+
+<sub>Grand View Research [13]. The first row is the segment Mayfly sells into.</sub>
+
 - **Who buys:** urban search and rescue teams, fire departments and county sheriffs, the same buyers who already procure single indoor drones. In the US alone FEMA's National Urban Search & Rescue Response System has 28 task forces [11], and many fire departments run their own technical rescue teams.
 - **Why they'd switch:** one LEMUR 2 costs about the same as a GPU base station plus a box of small drones. When a drone is crushed in a collapse, the team loses a cheap airframe, not its only one.
 - **How it fits their workflow:** it runs from a browser on the incident network, briefs the crew over the radio channel they already use, and keeps a person in charge of every route.
@@ -240,5 +291,6 @@ More detail lives next to the code: `gpucore/README.md`, `object_det/README.md`,
 10. Clockwork Labs. SpacetimeDB, [spacetimedb.com](https://spacetimedb.com).
 11. FEMA. National Urban Search & Rescue (US&R) Response System, [fema.gov/emergency-managers/national-preparedness/frameworks/urban-search-rescue](https://www.fema.gov/emergency-managers/national-preparedness/frameworks/urban-search-rescue).
 12. Cheng, Tianheng, et al. "YOLO-World: Real-Time Open-Vocabulary Object Detection." *arXiv*, 30 Jan. 2024, [arxiv.org/abs/2401.17270](https://arxiv.org/abs/2401.17270). Its weights are in the repo (`yolov8m-worldv2.pt`); the shipped detector is YOLO26m.
+13. Grand View Research. Drone market and drone-as-first-responder market size estimates, 2026–2033 (global drones $96.4B → $182.4B; drone-as-first-responder $3.5B → $11B at 17.7% CAGR).
 
 **Media in the demo video.** Stock footage and photos are public domain or Creative Commons. Authors and licences are listed per file in `video/public/stock/CREDITS.md`. Competitor names and logos are used only to identify products.

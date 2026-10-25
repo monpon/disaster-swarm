@@ -1,13 +1,8 @@
 import { Composition, Sequence, AbsoluteFill, staticFile } from "remotion";
 import { Audio } from "@remotion/media";
 import { FPS, H, W } from "./theme";
-import { PART_A, PART_B, PART_C_LEN, PART_D_LEN, S1, S2, S3, S4, S5, S6 } from "./timeline";
-import { S1Problem } from "./scenes/S1Problem";
-import { S2Limits } from "./scenes/S2Limits";
-import { S3Breakthrough } from "./scenes/S3Breakthrough";
-import { S4HowItWorks } from "./scenes/S4HowItWorks";
-import { S5Advantages } from "./scenes/S5Advantages";
-import { S6Research } from "./scenes/S6Research";
+import { PART_A, PART_B, PART_C_LEN, PART_D_LEN } from "./timeline";
+import { PartA } from "./scenes/PartA";
 import { PartB } from "./scenes/PartB";
 import { Closing } from "./scenes/Closing";
 import { PartC } from "./scenes/PartC";
@@ -16,26 +11,6 @@ import { Thumbnail } from "./Thumbnail";
 const f = (s: number) => Math.round(s * FPS);
 const LEN_B = PART_B.end - PART_B.start;
 const TOTAL = PART_A.end + LEN_B + PART_C_LEN + PART_D_LEN;
-
-function PartA() {
-  const scenes = [
-    [S1, S1Problem],
-    [S2, S2Limits],
-    [S3, S3Breakthrough],
-    [S4, S4HowItWorks],
-    [S5, S5Advantages],
-    [S6, S6Research],
-  ] as const;
-  return (
-    <>
-      {scenes.map(([s, Comp]) => (
-        <Sequence key={s.start} from={f(s.start)} durationInFrames={f(s.end - s.start)}>
-          <Comp />
-        </Sequence>
-      ))}
-    </>
-  );
-}
 
 type Props = { music: boolean; vo: boolean };
 
