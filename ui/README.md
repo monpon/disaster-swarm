@@ -1,6 +1,6 @@
 # Mayfly console (UI)
 
-Web console for Mayfly: mission setup, the live 3D map with drone feeds and findings, fleet configuration, settings, and a landing page. Built from the "v2 — orange" Paper designs.
+Web console for Mayfly, the search-and-rescue drone swarm: mission setup, the live 3D map with drone feeds and findings, fleet configuration, settings, and a landing page. Built from the "v2 — orange" Paper designs.
 
 Data is mocked in `apps/web/src/lib/mock.ts` until the console is wired to the edge server.
 
@@ -33,6 +33,26 @@ bun run check-types
 | `/fleet` | Drone list and per-drone configuration |
 | `/settings/detection` | Detection classes, thresholds, vitals, review |
 | `/settings/edge` | Edge server health and services |
+
+## Voice agent
+
+Push-to-talk and the text box in the crew channel (`/live`) ask Mayfly's voice agent. Gemini (default when `GEMINI_API_KEY` is set) or Claude (`claude-opus-5-5`) answers and acts through the same tools; Moss retrieves what the mission knows; ElevenLabs speaks.
+
+- **Questions:** findings, drones, how Mayfly works, and "how do I get to them?". Routes come from A* over the live floor plan (`src/lib/routing.ts`: 1 m cells, walls and blocked openings avoided, unmapped stretches cost more and are called out). They run from the nearest open entrance on the survivor's floor; stairs are not on the map, so there are no cross-floor routes yet.
+- **Changes:** detection classes (on/off, minimum confidence, speak immediately), camera vitals, the review threshold, pause and resume. These land in the same settings as `/settings/detection` and, with the simulator live, reach it as a `detection` command (the simulator acts on the person row).
+- **Proactive:** the bell in the channel header turns on voice alerts. New survivors (with their route) and blocked openings are spoken as they appear if their class is set to speak immediately. Alerts skip Claude: the console writes the sentence, ElevenLabs says it.
+- **Retrieval:** the console sends one short document per finding (with its route) and per recent event; the server upserts them into a Moss index with Mayfly's reference notes, and Claude's `search_mission` tool queries it. Without Moss credentials a keyword match over the same documents answers instead.
+
+Server: `src/server/voice-agent.ts` and `src/server/mission-search.ts` behind `POST /api/voice`. Environment (copy `apps/web/.env.example` to `apps/web/.env`, which is gitignored):
+
+| Variable | Needed for |
+|---|---|
+| `GEMINI_API_KEY`, `GEMINI_MODEL` (`gemini-3.6-flash`) | the agent, by default |
+| `ANTHROPIC_API_KEY` | the agent through Claude, when there is no Gemini key or `LLM_PROVIDER=claude` |
+| `ELEVENLABS_API_KEY` | ElevenLabs speech to text and voice; without it the browser's own speech stands in. Optional: `ELEVENLABS_VOICE_ID`, `ELEVENLABS_TTS_MODEL` (`eleven_flash_v2_5`), `ELEVENLABS_STT_MODEL` (`scribe_v1`) |
+| `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY` | Moss search. Optional: `MOSS_INDEX` (`mayfly-mission`) |
+
+Tests: `bun test` in `apps/web`.
 
 ## Rendered assets
 
