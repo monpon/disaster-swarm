@@ -3,6 +3,7 @@ import { CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 import { decodeB64, type BuildingInfo, type Candidate, type MapDeltas, type MapEntry, type SeenDeltas, type SimConfig } from "../types";
 import { siteDressing } from "./realview";
 import { PointCloud } from "./pointcloud";
+import { realTint } from "./textures";
 import { SurfaceLayer } from "./surface";
 import { VoxelLayer } from "./voxels";
 
@@ -149,7 +150,7 @@ export class MapView {
     this.demoVox = vox;
     this.demoShape = b.shape;
     this.demoShown = new Uint8Array(vox.length);
-    this.demoTints = b.palette.map((p) => new THREE.Color(p.rgb[0] / 255, p.rgb[1] / 255, p.rgb[2] / 255));
+    this.demoTints = b.palette.map((p) => realTint(p));
     this.demo.group.visible = this.demoOn;
     if (this.demoOn) this.revealAll();
   }

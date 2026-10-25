@@ -66,7 +66,7 @@ export function MapStory({ story }: { story: Story | null }) {
         <div className="relative aspect-[1019/700] w-full max-w-[920px] flex-1 overflow-hidden rounded-2xl bg-map shadow-[0_0_0_1px_var(--color-line-strong),0_24px_60px_rgb(21_21_21/0.14)]">
           <div className="absolute inset-x-0 top-0 z-10 flex h-11 items-center gap-2.5 border-b border-line bg-white px-3.5">
             <span className="size-[22px] rounded-[5px] bg-orange" />
-            <span className="text-[13px] font-semibold">418 Elm St</span>
+            <span className="text-[13px] font-semibold">Demo site</span>
             <span className="flex items-center gap-1.5 text-xs font-semibold text-orange-edge">
               <span className="size-[7px] rounded-full bg-person" />
               Live

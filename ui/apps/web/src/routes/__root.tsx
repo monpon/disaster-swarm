@@ -7,7 +7,7 @@ export const Route = createRootRoute({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Swarm: drone swarms for search and rescue" },
+      { title: "Mayfly: drone swarms for search and rescue" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },

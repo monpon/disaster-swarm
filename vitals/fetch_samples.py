@@ -21,7 +21,7 @@ QUERIES = {
     "neutral": "headshot portrait man",
 }
 PER_QUERY = 6
-HEADERS = {"User-Agent": "disaster-swarm-vitals-bench/0.1"}
+HEADERS = {"User-Agent": "mayfly-vitals-bench/0.1"}
 
 
 def search(query):

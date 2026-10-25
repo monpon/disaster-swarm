@@ -1,4 +1,4 @@
-//! GPU core of the disaster-swarm simulator. One `Core` owns every device buffer and kernel; Python
+//! GPU core of the Mayfly simulator. One `Core` owns every device buffer and kernel; Python
 //! calls a few coarse methods per tick (render, fuse, smooth, stream, ...) and never launches a GPU op.
 use std::collections::HashMap;
 use std::sync::Arc;

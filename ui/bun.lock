@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "disaster-swarm-ui",
+      "name": "mayfly-ui",
       "devDependencies": {
         "@swarm/config": "workspace:*",
         "@types/node": "^26.4.1",

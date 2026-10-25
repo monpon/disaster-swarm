@@ -160,6 +160,46 @@ const PAINTERS: Record<string, Painter> = {
   },
 };
 
+/** What the real-world view shows each material as: muted, weathered colours. The simulation's own palette (what the drones'
+ * cameras see, and what the master classifies materials by) is brighter and more saturated on purpose and is not changed. */
+const REAL_TINTS: Record<string, [number, number, number]> = {
+  asphalt: [62, 64, 68],
+  concrete: [158, 155, 148],
+  brick: [144, 88, 70],
+  floor: [122, 126, 132],
+  roof: [88, 96, 108],
+  steel: [106, 116, 130],
+  shelf: [168, 122, 72],
+  tank: [188, 192, 196],
+  debris: [112, 99, 87],
+  doorframe: [184, 160, 78],
+  glass: [128, 164, 182],
+  wood: [134, 100, 70],
+  container: [66, 104, 90],
+};
+
+export function realTint(p: { name: string; rgb: number[] }): THREE.Color {
+  const t = REAL_TINTS[p.name] ?? (p.rgb as [number, number, number]);
+  return new THREE.Color(t[0] / 255, t[1] / 255, t[2] / 255);
+}
+
+/** [roughness, metalness] per material: matte masonry, a little sheen on metal, smooth glass. */
+export const FINISH: Record<string, [number, number]> = {
+  asphalt: [0.95, 0],
+  concrete: [0.92, 0],
+  brick: [0.95, 0],
+  floor: [0.7, 0],
+  roof: [0.6, 0.15],
+  steel: [0.45, 0.5],
+  shelf: [0.6, 0.3],
+  tank: [0.4, 0.45],
+  debris: [1, 0],
+  doorframe: [0.6, 0.1],
+  glass: [0.08, 0.1],
+  wood: [0.8, 0],
+  container: [0.5, 0.35],
+};
+
 const cache = new Map<string, THREE.Texture>();
 
 export function materialTexture(name: string): THREE.Texture {

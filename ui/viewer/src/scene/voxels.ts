@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import type { PaletteEntry } from "../types";
-import { materialTexture } from "./textures";
+import { FINISH, materialTexture } from "./textures";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1);
 const tmpM = new THREE.Matrix4();
@@ -25,8 +25,8 @@ export class VoxelLayer {
     this.mats = palette.map((p) => {
       const m = new THREE.MeshStandardMaterial({
         map: materialTexture(p.name),
-        roughness: 0.85,
-        metalness: p.name === "steel" || p.name === "tank" ? 0.25 : 0.0,
+        roughness: (FINISH[p.name] ?? [0.85, 0])[0],
+        metalness: (FINISH[p.name] ?? [0.85, 0])[1],
         clippingPlanes: this.clip,
         clipShadows: true,
       });

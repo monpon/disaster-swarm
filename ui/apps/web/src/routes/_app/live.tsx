@@ -13,12 +13,11 @@ import { Timeline } from "@/components/live/timeline";
 import { ConsoleBody } from "@/components/shell/console-body";
 import { TopBar } from "@/components/shell/top-bar";
 import { useConsole } from "@/lib/console";
-import { mission as demoMission } from "@/lib/mock";
 import { store } from "@/lib/swarm";
 import { usePaneCollapse } from "@/lib/use-pane-collapse";
 
 export const Route = createFileRoute("/_app/live")({
-  head: () => ({ meta: [{ title: `Live: ${demoMission.address}` }] }),
+  head: () => ({ meta: [{ title: "Live mission" }] }),
   component: LivePage,
 });
 
