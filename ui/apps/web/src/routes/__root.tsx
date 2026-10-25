@@ -1,5 +1,7 @@
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
 
+import { SpacetimeAuthProvider } from "@/lib/spacetime-auth";
+
 import appCss from "../index.css?url";
 
 export const Route = createRootRoute({
@@ -30,7 +32,9 @@ function RootDocument() {
         <HeadContent />
       </head>
       <body>
-        <Outlet />
+        <SpacetimeAuthProvider>
+          <Outlet />
+        </SpacetimeAuthProvider>
         <Scripts />
       </body>
     </html>

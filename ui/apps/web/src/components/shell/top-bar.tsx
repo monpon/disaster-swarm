@@ -1,15 +1,17 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
-import { authClient } from "@/lib/auth-client";
+import { useAuth } from "react-oidc-context";
+
+import { displayName } from "@/lib/spacetime-auth";
 
 import { Mark } from "../icons";
 
 /** Console top bar: brand mark, page-specific left content, page actions, avatar. */
 export function TopBar({ children, actions }: { children?: ReactNode; actions?: ReactNode }) {
   const navigate = useNavigate();
-  const { data } = authClient.useSession();
-  const name = data?.user.name ?? "";
+  const auth = useAuth();
+  const name = displayName(auth.user);
   const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join("") || "?";
   return (
     <header className="flex h-[52px] shrink-0 items-center gap-3 border-b border-line bg-white px-3">
@@ -24,8 +26,8 @@ export function TopBar({ children, actions }: { children?: ReactNode; actions?: 
         title={name ? `Sign out ${name}` : "Sign out"}
         aria-label="Sign out"
         onClick={async () => {
-          await authClient.signOut();
-          await navigate({ to: "/sign-in", search: { redirect: "/setup" } });
+          await auth.removeUser();
+          await navigate({ to: "/" });
         }}
         className="flex size-[30px] items-center justify-center rounded-full bg-[#e7e7e4] text-xs font-semibold hover:bg-line-strong"
       >
