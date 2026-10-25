@@ -1,0 +1,26 @@
+[project]
+name = "disaster-sim"
+version = "0.1.0"
+description = "Search-and-rescue drone swarm simulator with a central master controller"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+gpu = ["torch", "scikit-image"]  # smoothing + surface fusion on a CUDA GPU (pip install torch --index-url https://download.pytorch.org/whl/cu130)
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["disaster_sim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
