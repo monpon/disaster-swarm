@@ -1,0 +1,16 @@
+yolo_detector_node:
+  ros__parameters:
+    model_path: "model.pt"
+    camera_topic: "/camera/image_raw"
+    confidence_threshold: 0.35
+    iou_threshold: 0.45
+    imgsz: 256
+    device: ""  # empty for auto (cuda:0 if NVIDIA GPU present, else cpu)
+    half: true   # use FP16 on GPU (e.g. GB10 Blackwell)
+    publish_detections: true
+    publish_json: true
+    publish_annotated_image: true
+    detection_topic: "detections"
+    json_topic: "detections/json"
+    annotated_topic: "detections/annotated_image"
+    drop_stale_frames: true

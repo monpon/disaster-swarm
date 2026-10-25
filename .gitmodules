@@ -1,0 +1,3 @@
+[submodule "object_det/turbodrone"]
+	path = object_det/turbodrone
+	url = git@github.com:RaameshB/turbodrone.git
