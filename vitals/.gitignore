@@ -1,0 +1,5 @@
+.venv/
+.env
+samples/*.jpg
+feeds/
+results/raw/
