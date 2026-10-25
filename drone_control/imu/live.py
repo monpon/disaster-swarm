@@ -34,7 +34,18 @@ IMU_PORT = 9101
 IMU_REC = 18
 TICKS_WRAP = 1 << 30        # MicroPython ticks_us period on the ESP32
 CALIBRATE_S = 2.0
-DRIFT_HP_HZ = 0.5           # drift filter on velocity and position when the board never pauses
+# IMU-only position drifts, so when the board has not paused for HP_AFTER_S (no still period to reset the velocity) the tracker
+# has to leak something. Two ways, selectable at run time:
+#   "hold"     (default): the velocity leaks when the board has not paused (HOLD_V_HZ), and the position leaks very slowly while the
+#              board is moving (HOLD_P_HZ, ~5 s). The path fades over several seconds instead of snapping back, the wander is
+#              bounded, and a board at rest keeps its position. Measured on a 7-minute recording of the real board: one
+#              snap-back, position within ~1.2 m (95% of the time within 0.6 m), against 33 snap-backs in recentre mode.
+#   "recentre" the old behaviour: velocity and position both leak (DRIFT_HP_HZ), which drains the position to the origin
+#              within about a second of continuous motion.
+PATH_MODES = ("hold", "recentre")
+DRIFT_HP_HZ = 0.5           # recentre mode: leak cutoff on velocity and position
+HOLD_P_HZ = 0.03            # hold mode: position leak cutoff while moving (time constant ~5 s): bounds the wander, no visible snap
+HOLD_V_HZ = 0.25            # hold mode: leak cutoff on velocity only (time constant ~0.6 s)
 HP_AFTER_S = 1.5            # ... i.e. after this long without a still period (one slide is shorter)
 MAX_SPEED = 2.0             # m/s; faster than a hand or a small indoor drone, so it can only be drift
 
@@ -42,10 +53,16 @@ MAX_SPEED = 2.0             # m/s; faster than a hand or a small indoor drone, s
 class Tracker:
     """Online version of path.py: gyro + tilt-corrected orientation, ZUPT velocity resets."""
 
-    def __init__(self, log=None):
+    def __init__(self, log=None, mode="hold"):
         self.lock = threading.Lock()
         self.log = log            # raw samples as board_stream.py CSV, replayable with path.py
+        self.set_mode(mode)
         self.recalibrate()
+
+    def set_mode(self, mode):
+        if mode not in PATH_MODES:
+            raise ValueError(f"path mode must be one of {PATH_MODES}, not {mode!r}")
+        self.mode = mode
 
     def recalibrate(self):
         with self.lock:
@@ -109,19 +126,25 @@ class Tracker:
             # Then velocity and position both leak toward zero (as path.py's highpass mode), so
             # the path shows motion relative to where the board is held instead of running away.
             self.relative = self.since_still > HP_AFTER_S
-            k = 1 / (1 + 2 * math.pi * DRIFT_HP_HZ * dt) if self.relative else 1.0
+            leak = 1.0   # what the velocity keeps per step
+            kp = 1.0 if (self.mode == "recentre" or self.still) else 1 / (1 + 2 * math.pi * HOLD_P_HZ * dt)   # ... and the position
+            if self.relative:
+                hz = DRIFT_HP_HZ if self.mode == "recentre" else HOLD_V_HZ
+                leak = 1 / (1 + 2 * math.pi * hz * dt)
+                if self.mode == "recentre":
+                    kp = leak
             if self.still:
                 self.v = (0.0, 0.0, 0.0)
             else:
-                v = [k * (self.v[c] + lin[c] * dt) for c in range(3)]
+                v = [leak * (self.v[c] + lin[c] * dt) for c in range(3)]
                 speed = math.sqrt(sum(c * c for c in v))
                 self.v = tuple(c * MAX_SPEED / speed for c in v) if speed > MAX_SPEED else tuple(v)
-            self.p = tuple(k * (self.p[c] + self.v[c] * dt) for c in range(3))
+            self.p = tuple(kp * (self.p[c] + self.v[c] * dt) for c in range(3))
 
     def state(self):
         with self.lock:
             return dict(calibrating=self.bias is None, q=[round(c, 5) for c in self.q],
-                        p=[round(c, 4) for c in self.p], still=self.still, relative=self.relative)
+                        p=[round(c, 4) for c in self.p], still=self.still, relative=self.relative, mode=self.mode)
 
 
 class Rate:
@@ -143,8 +166,8 @@ class Rate:
 
 
 class Live:
-    def __init__(self, log=None):
-        self.tracker = Tracker(log)
+    def __init__(self, log=None, mode="hold"):
+        self.tracker = Tracker(log, mode)
         self.imu_rate = Rate()
         self.video_rate = Rate()
         self.frame = None
@@ -263,6 +286,11 @@ def make_handler(live):
                 live.tracker.zero()
             elif self.path == "/calibrate":
                 live.tracker.recalibrate()
+            elif self.path.startswith("/mode/"):
+                try:
+                    live.tracker.set_mode(self.path[len("/mode/"):])
+                except ValueError:
+                    return self.send_error(400)
             else:
                 return self.send_error(404)
             self.send_response(204)
@@ -316,6 +344,9 @@ def main():
     ap.add_argument("--relay", help="relay IP for video + UDP IMU (S3 AP: 192.168.5.1)")
     ap.add_argument("--serial", help="read IMU from board_stream.py over this USB device instead of UDP")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--path-mode", choices=PATH_MODES, default="hold",
+                    help="what the tracker leaks when the board never pauses: hold = velocity only (the path stays put), recentre = also position")
+    ap.add_argument("--host", default="127.0.0.1", help="address to serve the page on (0.0.0.0 to open it from another machine)")
     args = ap.parse_args()
     if not args.relay and not args.serial:
         ap.error("need --relay and/or --serial")
@@ -324,14 +355,14 @@ def main():
     log = open(log_path, "w", buffering=1)
     log.write("# t_us,ax,ay,az,gx,gy,gz\n")
     print(f"raw IMU log: {log_path}", flush=True)
-    live = Live(log)
+    live = Live(log, args.path_mode)
     jobs = []
     if args.relay:
         jobs.append((live.run_video, (args.relay,)))
     jobs.append((live.run_imu_serial, (args.serial,)) if args.serial else (live.run_imu_udp, ()))
     for target, a in jobs:
         threading.Thread(target=target, args=a, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(live))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(live))
     server.daemon_threads = True
     print(f"live view: http://localhost:{args.port}/", flush=True)
 

@@ -60,6 +60,9 @@ simulator's websocket as before.
 scripts/stdb-up.sh            # SpacetimeDB on :3000, the swarm_db module, and the simulator publishing into it
 scripts/stdb-up.sh publish    # re-publish the module after editing swarm_db/spacetimedb/src/lib.rs
 # viewers: http://<host>:8000/      (the page asks /config where to read from; ?source=ws forces the websocket)
+# console:  http://<host>:3001/live   (scripts/console-up.sh serves the built web console from the GX10; build it with `cd ui && bun run build`,
+#            copy ui/apps/web/.output to ~/console-out there, node 22 in ~/node)
+# real drone: drone_control/publish_db.py puts its status and video in the same database (read-only; see drone_control/control/README.md)
 ```
 
 Needs the SpacetimeDB CLI (`curl -sSf https://install.spacetimedb.com | sh`) and the `wasm32-unknown-unknown` Rust target.

@@ -5,7 +5,7 @@ import { useState } from "react";
 
 import { useConsole } from "@/lib/console";
 import { vitals as demoVitals } from "@/lib/mock";
-import { type LiveFinding as Finding } from "@/lib/swarm";
+import { scanOf, type LiveFinding as Finding } from "@/lib/swarm";
 
 import { FindingIcon } from "../icons";
 import { FeedCanvas } from "./feed-canvas";
@@ -120,11 +120,20 @@ function DroneRows() {
   const c = useConsole();
   return (
     <div className="flex flex-col">
+      {c.live && c.raw.real && (
+        <div className="flex h-12 items-center gap-3 border-b border-line-soft bg-door/10 px-4">
+          <span className={cn("size-2 rounded-full", c.raw.real.fresh ? "bg-ok" : "bg-line-strong")} />
+          <span className="font-mono text-[13px] font-semibold">REAL</span>
+          <span className="flex-1 text-[13px]">E58 via relay · {c.raw.real.fresh ? (c.raw.real.control?.state ?? "watching") : "offline"}</span>
+          <span className="font-mono text-xs text-muted">{Math.round(c.raw.real.imu?.hz ?? 0)} Hz</span>
+        </div>
+      )}
       {c.drones.map((d) => (
         <div key={d.id} className="flex h-12 items-center gap-3 border-b border-line-soft px-4">
           <span className={cn("size-2 rounded-full", d.status === "calibrate" ? "bg-hazard" : "bg-ok")} />
           <span className="w-8 font-mono text-[13px] font-semibold">{d.id}</span>
           <span className="flex-1 text-[13px]">{d.room}</span>
+          {scanOf(d) != null && <span className="animate-pulse rounded bg-person px-1.5 py-0.5 font-mono text-[11px] font-semibold text-white">scanning #{scanOf(d)}</span>}
           <span className={cn("font-mono text-xs", d.battery < 40 ? "font-semibold text-orange-edge" : "text-muted")}>{d.battery}%</span>
           <span className="w-12 text-right font-mono text-xs text-muted">{d.signal}</span>
         </div>

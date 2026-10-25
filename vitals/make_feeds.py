@@ -70,7 +70,7 @@ def physiology_frames(img, mask, hr, rr, n):
         p = np.sin(2 * np.pi * hr / 60 * t + pulse_phase) + 0.3 * np.sin(4 * np.pi * hr / 60 * t + pulse_phase)
         frame = base * (1 + mask * PULSE_GAIN * p)
         b = BREATH_STRETCH * np.sin(2 * np.pi * rr / 60 * t)
-        frame = cv2.remap(frame, xs, ys / (1 + b), cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        frame = cv2.remap(frame, xs, (ys / (1 + b)).astype(np.float32), cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         yield np.clip(frame, 0, 255).astype(np.uint8)
 
 

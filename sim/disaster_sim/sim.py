@@ -31,6 +31,16 @@ class Simulation:
     def __init__(self, cfg: SimConfig | None = None):
         self.reset(cfg or SimConfig())
 
+    def scanning(self, drone: int) -> int | None:
+        """The survivor (candidate id) this drone is reading vitals from right now: holding on them, or waiting on the reading."""
+        pending = next((c for _, d, c, _ in self._vitals_out if d == drone), None)
+        if pending is not None:
+            return int(pending)
+        if self._dwell.get(drone, 0.0) > 0.0:
+            r = self.master.drones[drone]
+            return None if r.candidate is None else int(r.candidate)
+        return None
+
     def _vitals_step(self, dt: float) -> None:
         """The vitals sensor: a drone that has confirmed a survivor and holds steady a few metres from them, camera on them,
         gets a Presage (simulated) reading after a few seconds. The sensor looks at the real person in front of the camera;
@@ -409,6 +419,7 @@ class Simulation:
                 "backlog": len(self.backlog[i]),
                 "path": [[round(float(v), 2) for v in p] for p in r.path[wp:wp + 40]] if r.path else [],
                 "serves": None if r.serves is None else int(r.serves),
+                "scan": self.scanning(i),
             })
         return out
 

@@ -5,7 +5,7 @@ import { ChevronDown, Layers, Minus, Plus, SquareDashed } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useConsole } from "@/lib/console";
-import { droneName, floorOf, planTransform, viewerUrl, type Plan } from "@/lib/swarm";
+import { droneName, floorOf, planTransform, scanOf, viewerUrl, type Plan } from "@/lib/swarm";
 import type { Finding } from "@/lib/mock";
 
 import { findingStyle, Quad } from "../icons";
@@ -15,7 +15,7 @@ const W = 1019;
 const H = 636;
 const FENCE = "435,131 928.6,416 566.6,625 73,340";
 
-function DroneMarker({ id, at, selected, holding, onSelect }: { id: string; at: [number, number]; selected: boolean; holding?: boolean; onSelect: () => void }) {
+function DroneMarker({ id, at, selected, holding, scanning, onSelect }: { id: string; at: [number, number]; selected: boolean; holding?: boolean; scanning?: number | null; onSelect: () => void }) {
   return (
     <button
       type="button"
@@ -24,9 +24,11 @@ function DroneMarker({ id, at, selected, holding, onSelect }: { id: string; at: 
       style={{ left: at[0] - 11, top: at[1] - 11 }}
       aria-label={`Select ${id}`}
     >
+      {scanning != null && <span className="absolute top-0 left-0 size-[22px] animate-ping rounded-full bg-person/60" />}
       <span
         className={cn(
-          "flex items-center justify-center rounded-full",
+          "relative flex items-center justify-center rounded-full",
+          scanning != null && "shadow-[0_0_0_3px_var(--color-person)]",
           selected
             ? "size-6 -translate-x-px -translate-y-px bg-orange text-white shadow-[0_0_0_2px_#fff,0_0_0_3.5px_var(--color-orange-edge),0_2px_6px_rgb(194_65_12/0.4)]"
             : "size-[22px] bg-white text-ink shadow-[0_0_0_1.5px_var(--color-ink),0_2px_4px_rgb(0_0_0/0.2)]",
@@ -41,7 +43,7 @@ function DroneMarker({ id, at, selected, holding, onSelect }: { id: string; at: 
         )}
       >
         {id}
-        {holding ? " holding" : ""}
+        {scanning != null ? ` scanning #${scanning}` : holding ? " holding" : ""}
       </span>
     </button>
   );
@@ -144,7 +146,7 @@ function Cloud3D({
             .map((d) => {
               const p = at(d.ep as [number, number, number]);
               return p ? (
-                <DroneMarker key={d.id} id={droneName(d.id)} at={p} holding={d.holding || d.mode === "relay"} selected={droneName(d.id) === selectedDrone} onSelect={() => onSelectDrone(droneName(d.id))} />
+                <DroneMarker key={d.id} id={droneName(d.id)} at={p} scanning={scanOf(d)} holding={d.holding || d.mode === "relay"} selected={droneName(d.id) === selectedDrone} onSelect={() => onSelectDrone(droneName(d.id))} />
               ) : null;
             })}
         {cam &&
@@ -218,8 +220,8 @@ export function ScanMap({
   const drones = c.live
     ? c.raw.drones
         .filter((d) => !d.crashed && floorOf(c.raw, d.ep[2]) === fl)
-        .map((d) => ({ id: droneName(d.id), marker: at(d.ep as [number, number, number]), holding: d.holding || d.mode === "relay" }))
-    : liveDrones.map((d) => ({ id: d.id, marker: (d as { marker?: [number, number] }).marker, holding: d.holding }));
+        .map((d) => ({ id: droneName(d.id), marker: at(d.ep as [number, number, number]), holding: d.holding || d.mode === "relay", scan: scanOf(d) }))
+    : liveDrones.map((d) => ({ id: d.id, marker: (d as { marker?: [number, number] }).marker, holding: d.holding, scan: null as number | null }));
   const entries = c.live ? c.raw.entries.filter((e) => Math.abs(e.normal[2]) <= 0.5 && floorOf(c.raw, e.center[2]) === fl) : [];
 
   return (
@@ -269,7 +271,7 @@ export function ScanMap({
         </svg>
         {drones.map((d) =>
           d.marker ? (
-            <DroneMarker key={d.id} id={d.id} at={d.marker} holding={d.holding} selected={d.id === selectedDrone} onSelect={() => onSelectDrone(d.id)} />
+            <DroneMarker key={d.id} id={d.id} at={d.marker} holding={d.holding} scanning={d.scan} selected={d.id === selectedDrone} onSelect={() => onSelectDrone(d.id)} />
           ) : null,
         )}
         {findings.map((f) => (

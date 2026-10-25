@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { useConsole } from "@/lib/console";
 import { feedBoxes } from "@/lib/mock";
-import { droneNumber, store } from "@/lib/swarm";
+import { droneNumber, scanOf, store } from "@/lib/swarm";
 
 import { FeedCanvas } from "./feed-canvas";
 
@@ -15,7 +15,9 @@ export function FeedStrip({ selected, onSelect, onFocus }: { selected: string; o
   const root = useRef<HTMLDivElement>(null);
   // every drone has a tile, but only the ones scrolled into view (plus the selected one) are streamed
   const [visible, setVisible] = useState<Set<string>>(new Set());
-  const ids = [...new Set([selected, ...visible])].map(droneNumber).sort((a, b) => a - b).join(",");
+  const real = c.live ? c.raw.real : null;   // the real drone, if drone_control/publish_db.py is feeding the database
+  const num = (id: string) => (id === "REAL" ? -1 : droneNumber(id));
+  const ids = [...new Set([selected, ...visible])].filter((id) => id !== "REAL" || real).map(num).sort((a, b) => a - b).join(",");
 
   useEffect(() => {
     const el = root.current;
@@ -35,7 +37,7 @@ export function FeedStrip({ selected, onSelect, onFocus }: { selected: string; o
     );
     el.querySelectorAll("[data-drone]").forEach((n) => io.observe(n));
     return () => io.disconnect();
-  }, [shown.length]);
+  }, [shown.length, !!real]);
 
   useEffect(() => {
     if (c.live) store.watchFeeds(ids ? ids.split(",").map(Number) : []);
@@ -58,7 +60,11 @@ export function FeedStrip({ selected, onSelect, onFocus }: { selected: string; o
             onDoubleClick={() => onFocus(d.id)}
             className={cn(
               "flex min-w-[220px] flex-1 shrink-0 flex-col overflow-hidden rounded-lg bg-white text-left",
-              active ? "shadow-[0_0_0_2px_var(--color-orange)]" : "shadow-[0_0_0_1px_var(--color-line)] hover:shadow-[0_0_0_1px_var(--color-line-strong)]",
+              scanOf(d) != null
+                ? "shadow-[0_0_0_3px_var(--color-person)]"
+                : active
+                  ? "shadow-[0_0_0_2px_var(--color-orange)]"
+                  : "shadow-[0_0_0_1px_var(--color-line)] hover:shadow-[0_0_0_1px_var(--color-line-strong)]",
             )}
           >
             <div className="relative min-h-0 flex-1 bg-[#222]">
@@ -79,6 +85,11 @@ export function FeedStrip({ selected, onSelect, onFocus }: { selected: string; o
               >
                 {d.id}
               </span>
+              {scanOf(d) != null && (
+                <span className="absolute bottom-2 left-2 flex animate-pulse items-center gap-1 rounded bg-person px-1.5 py-0.5 font-mono text-[11px] font-semibold text-white">
+                  scanning #{scanOf(d)}
+                </span>
+              )}
               <span
                 role="button"
                 aria-label={`Focus ${d.id}`}
@@ -116,6 +127,40 @@ export function FeedStrip({ selected, onSelect, onFocus }: { selected: string; o
           </button>
         );
       })}
+      {real && (
+        <button
+          type="button"
+          data-drone="REAL"
+          onDoubleClick={() => onFocus("REAL")}
+          className={cn("flex min-w-[220px] flex-1 shrink-0 flex-col overflow-hidden rounded-lg bg-white text-left", real.fresh ? "shadow-[0_0_0_2px_var(--color-door)]" : "opacity-60 shadow-[0_0_0_1px_var(--color-line)]")}
+        >
+          <div className="relative min-h-0 flex-1 bg-[#222]">
+            {real.fresh ? (
+              <FeedCanvas drone={-1} className="absolute inset-0 size-full object-contain" />
+            ) : (
+              <span className="absolute inset-0 flex items-center justify-center text-xs text-white/50">real drone offline</span>
+            )}
+            <span className="absolute top-2 left-2 rounded bg-door px-1.5 py-0.5 font-mono text-[11px] font-semibold text-white">REAL E58</span>
+            <span
+              role="button"
+              aria-label="Focus the real drone"
+              title="Focus this drone's view"
+              onClick={(e) => {
+                e.stopPropagation();
+                onFocus("REAL");
+              }}
+              className="absolute top-2 right-2 flex size-6 items-center justify-center rounded bg-black/55 text-white hover:bg-black/80"
+            >
+              <Maximize2 className="size-3.5" />
+            </span>
+          </div>
+          <div className="flex h-8 shrink-0 items-center gap-2 px-2.5">
+            <span className="flex-1 truncate text-[13px] font-medium">{real.control?.state ?? "relay"} · {real.fresh ? "live" : "offline"}</span>
+            <span className="font-mono text-xs text-muted">imu {Math.round(real.imu?.hz ?? 0)} Hz</span>
+            <span className="font-mono text-xs text-muted">{Math.round(real.video?.fps ?? 0)} fps</span>
+          </div>
+        </button>
+      )}
     </div>
   );
 }
@@ -123,6 +168,24 @@ export function FeedStrip({ selected, onSelect, onFocus }: { selected: string; o
 /** One drone's camera on the main screen, in place of the map. */
 export function FocusedFeed({ id, onBack }: { id: string; onBack: () => void }) {
   const c = useConsole();
+  if (id === "REAL") {
+    const real = c.live ? c.raw.real : null;
+    return (
+      <div className="relative h-full w-full bg-[#111]">
+        {real?.fresh ? <FeedCanvas drone={-1} className="absolute inset-0 size-full object-contain" /> : <span className="absolute inset-0 flex items-center justify-center text-sm text-white/50">real drone offline</span>}
+        <button type="button" onClick={onBack} className="absolute top-3 left-3 flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-ink shadow-[0_0_0_1px_var(--color-line)] hover:bg-panel">
+          <ArrowLeft className="size-3.5" /> Back to map
+        </button>
+        <span className="absolute top-3 right-3 rounded bg-door px-2 py-0.5 font-mono text-xs font-semibold text-white">REAL E58 (not the simulation)</span>
+        <div className="absolute inset-x-0 bottom-0 flex items-center gap-4 bg-gradient-to-t from-black/70 to-transparent px-4 pt-10 pb-3 font-mono text-xs text-white">
+          <span className="flex-1 truncate font-sans text-sm font-medium">{real?.control?.state ?? "relay"}</span>
+          <span>imu {Math.round(real?.imu?.hz ?? 0)} Hz</span>
+          <span>{Math.round(real?.video?.fps ?? 0)} fps</span>
+          <span>frames intact {real?.video?.ok_pct ?? "–"}%</span>
+        </div>
+      </div>
+    );
+  }
   const fd = c.drones.find((d) => d.id === id);
   if (!fd) return null;
   const frame = c.live ? c.raw.feeds[droneNumber(fd.id)] : undefined;
@@ -137,6 +200,7 @@ export function FocusedFeed({ id, onBack }: { id: string; onBack: () => void }) 
         <ArrowLeft className="size-3.5" /> Back to map
       </button>
       <span className="absolute top-3 right-3 rounded bg-orange px-2 py-0.5 font-mono text-xs font-semibold text-white">{fd.id}</span>
+      {scanOf(fd) != null && <span className="absolute top-12 left-3 animate-pulse rounded bg-person px-2 py-0.5 font-mono text-xs font-semibold text-white">scanning survivor #{scanOf(fd)}</span>}
       <div className="absolute inset-x-0 bottom-0 flex items-center gap-4 bg-gradient-to-t from-black/70 to-transparent px-4 pt-10 pb-3 font-mono text-xs text-white">
         <span className="flex-1 truncate font-sans text-sm font-medium">{fd.room}</span>
         <span>{fd.battery}%</span>

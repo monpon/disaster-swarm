@@ -99,6 +99,7 @@ export interface DroneState {
   backlog: number;
   path: Vec3[];
   serves: number | null;
+  scan?: number | null;
 }
 
 export interface Metrics {

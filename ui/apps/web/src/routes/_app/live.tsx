@@ -127,7 +127,7 @@ function LivePage() {
                           if (focus) setFocus(id);
                         }}
                         onFocus={(id) => {
-                          setDrone(id);
+                          if (id !== "REAL") setDrone(id);
                           setFocus(id);
                         }}
                       />

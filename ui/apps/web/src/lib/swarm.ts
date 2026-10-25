@@ -48,9 +48,11 @@ export interface Live {
   events: LiveEvent[];
   plan: Plan | null;
   feeds: Record<number, Feed>;
+  /** The real drone (published by drone_control/publish_db.py), next to the simulation; `fresh` = still delivering. */
+  real: (J & { fresh: boolean }) | null;
 }
 
-const EMPTY: Live = { connected: false, world: null, metrics: null, drones: [], candidates: [], entries: [], events: [], plan: null, feeds: {} };
+const EMPTY: Live = { connected: false, world: null, metrics: null, drones: [], candidates: [], entries: [], events: [], plan: null, feeds: {}, real: null };
 
 class Store {
   private state: Live = EMPTY;
@@ -64,6 +66,7 @@ class Store {
   private feedListeners = new Map<number, Set<(b: ImageBitmap) => void>>();
   private feedSubs = new Map<number, { unsubscribe: () => void }>();
   private wanted: number[] = [];
+  private realAt = 0;   // when (this clock) the real drone's status row last changed
   private timer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private readonly id = Math.random().toString(36).slice(2);
@@ -82,6 +85,7 @@ class Store {
     const qs = new URLSearchParams(location.search);
     this.connect(qs.get("stdb") ?? `ws://${location.hostname}:3000`, qs.get("db") ?? "swarm");
     setInterval(() => this.sendSelect(), 4000);
+    setInterval(() => this.schedule(), 2000);   // so a real drone that stops publishing goes stale on screen
   }
 
   private connect(uri: string, db: string): void {
@@ -118,14 +122,15 @@ class Store {
   }
 
   private set(key: string, text: string, data: Uint8Array): void {
+    if (key === "real/status") this.realAt = Date.now();
     this.rows.set(key, { text, data });
     this.schedule();
   }
 
   private feed(key: string, text: string, data: Uint8Array): void {
-    const k = /^feed\/jpg(\d+)$/.exec(key);
+    const k = /^feed\/jpg(\d+|real)$/.exec(key);
     if (!k) return;
-    const id = Number(k[1]);
+    const id = k[1] === "real" ? -1 : Number(k[1]);   // -1: the real drone's camera
     const m = JSON.parse(text) as Feed;
     const first = !this.feeds[id];
     this.feeds[id] = m;
@@ -171,6 +176,7 @@ class Store {
   private rebuild(): void {
     const world = this.json("world");
     const metrics = this.json("metrics");
+    const rs = this.json("real/status");
     let plan: Plan | null = null;
     const floors: Uint8Array[] = [];
     let meta: J = null;
@@ -190,6 +196,7 @@ class Store {
       events: [...this.events.values()].sort((a, b) => a.seq - b.seq),
       plan,
       feeds: { ...this.feeds },
+      real: rs ? { ...rs, fresh: !!rs.online && Date.now() - this.realAt < 5000 } : null,
     };
     this.emit();
   }
@@ -218,12 +225,12 @@ class Store {
       }
     }
     for (const id of this.wanted) {
-      if (!this.feedSubs.has(id)) this.feedSubs.set(id, c.subscriptionBuilder().subscribe([`SELECT * FROM bulk WHERE key = 'feed/jpg${id}'`]));
+      if (!this.feedSubs.has(id)) this.feedSubs.set(id, c.subscriptionBuilder().subscribe([`SELECT * FROM bulk WHERE key = 'feed/jpg${id < 0 ? "real" : id}'`]));
     }
   }
 
   private sendSelect(): void {
-    this.conn?.reducers.submitCmd({ name: "select", args: JSON.stringify({ drones: this.wanted, client: this.id }) });
+    this.conn?.reducers.submitCmd({ name: "select", args: JSON.stringify({ drones: this.wanted.filter((d) => d >= 0), client: this.id }) });
   }
 
   /** A command for the simulator: play, pause, speed, step, reset, recall. */
@@ -265,9 +272,13 @@ export function liveMission(live: Live) {
   };
 }
 
-export function liveDrones(live: Live): (Drone & { n: number; mode: string })[] {
+/** The survivor (candidate id) a drone is reading vitals from right now, if any. */
+export const scanOf = (d: object): number | null => (d as { scan?: number | null }).scan ?? null;
+
+export function liveDrones(live: Live): (Drone & { n: number; mode: string; scan: number | null })[] {
   return live.drones.map((d) => ({
     n: d.id,
+    scan: d.scan ?? null,
     mode: d.mode,
     id: droneName(d.id),
     room: d.crashed ? "Lost" : `Floor ${floorOf(live, d.ep[2]) + 1} · ${d.mode}`,
