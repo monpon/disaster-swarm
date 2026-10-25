@@ -25,3 +25,6 @@ __pycache__
 
 # Vercel
 .vercel
+
+# Local auth database
+data

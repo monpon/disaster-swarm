@@ -9,8 +9,10 @@ import { Mark } from "@/components/icons";
 import { Stage } from "@/components/map/stage";
 import { elmStreet } from "@/lib/building";
 import { addressResults, missionTypes, recentMissions } from "@/lib/mock";
+import { requireUser } from "@/lib/session";
 
 export const Route = createFileRoute("/missions/new")({
+  beforeLoad: ({ location }) => requireUser(location.href),
   head: () => ({ meta: [{ title: "New mission" }] }),
   component: NewMissionPage,
 });
@@ -164,7 +166,7 @@ function NewMissionPage() {
             )}
             <span
               className="absolute flex h-[26px] items-center gap-1.5 rounded-full bg-ink pr-2.5 pl-1 text-xs font-semibold text-white shadow-[0_2px_6px_rgb(0_0_0/0.25)]"
-              style={{ left: 515, top: 520 }}
+              style={{ left: 250, top: 560 }}
             >
               <span className="flex size-[18px] items-center justify-center rounded-full bg-person">
                 <Truck className="size-2.5" />
@@ -202,7 +204,7 @@ function NewMissionPage() {
 function BuildingCard({ street, showZoning }: { street: string; showZoning: boolean }) {
   const b = elmStreet;
   return (
-    <div className="absolute flex w-[290px] flex-col overflow-hidden rounded-[10px] bg-white shadow-[0_0_0_1px_var(--color-line),0_10px_28px_rgb(0_0_0/0.14)]" style={{ left: 471, top: 300 }}>
+    <div className="absolute flex w-[290px] flex-col overflow-hidden rounded-[10px] bg-white shadow-[0_0_0_1px_var(--color-line),0_10px_28px_rgb(0_0_0/0.14)]" style={{ left: 510, top: 290 }}>
       <div className="flex flex-col gap-0.5 px-3.5 pt-3 pb-2.5">
         <span className="text-[15px] font-semibold">{street}</span>
         <span className="flex items-center gap-1.5 text-xs text-muted">

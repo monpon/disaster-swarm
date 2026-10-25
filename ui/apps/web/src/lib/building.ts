@@ -63,5 +63,5 @@ export const elmStreet: BuildingContext = {
   lot: { label: "Lot", value: "0.18 acre", trust: "record", source: "Sangamon County parcels, TOTACRES" },
   zoning: { label: "Zoning", value: "R-2", trust: "record", source: "Springfield PW_Zoning parcelZonesView" },
   ceiling: { label: "Regulatory ceiling", value: "400 ft AGL", trust: "record", source: "14 CFR 107.51. Airspace and TFRs may lower it." },
-  parcel: "M 392 372 L 566 354 L 590 508 L 408 528 Z",
+  parcel: "M 390 392 L 486 388 L 490 508 L 394 512 Z",
 };
