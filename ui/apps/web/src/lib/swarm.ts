@@ -83,7 +83,7 @@ class Store {
     if (this.started || typeof window === "undefined") return;
     this.started = true;
     const qs = new URLSearchParams(location.search);
-    this.connect(qs.get("stdb") ?? `ws://${location.hostname}:3000`, qs.get("db") ?? "swarm");
+    this.connect(stdbUrl(), qs.get("db") ?? "swarm");
     setInterval(() => this.sendSelect(), 4000);
     setInterval(() => this.schedule(), 2000);   // so a real drone that stops publishing goes stale on screen
   }
@@ -362,12 +362,17 @@ export function planTransform(plan: Plan, w: number, h: number, margin = 60) {
   return { s, ox, oy, at: (x: number, y: number): [number, number] => [ox + (x - plan.x0) * s, oy + (plan.y0 + plan.h - y) * s] };
 }
 
-/** Where the 3D viewer is served (the simulator's server, same host as the database unless `?viewer=` says otherwise). */
+/** The database address: `?stdb=`, else the build's VITE_STDB_URL (a hosted console, e.g. a wss:// tunnel), else port 3000 on the page's host. */
+export function stdbUrl(): string {
+  return new URLSearchParams(location.search).get("stdb") || import.meta.env.VITE_STDB_URL || `ws://${location.hostname}:3000`;
+}
+
+/** Where the 3D viewer is served (the simulator's server, same host as the database unless `?viewer=` or VITE_VIEWER_URL says otherwise). */
 export function viewerUrl(): string {
   const qs = new URLSearchParams(location.search);
   const v = qs.get("viewer");
   if (v) return v;
-  const db = qs.get("stdb") ?? `ws://${location.hostname}:3000`;
-  const base = `http://${new URL(db).hostname}:8000/`;
+  const db = stdbUrl();
+  const base = import.meta.env.VITE_VIEWER_URL || `http://${new URL(db).hostname}:8000/`;
   return `${base}?embed=cloud&stdb=${encodeURIComponent(db)}&db=${encodeURIComponent(qs.get("db") ?? "swarm")}`;
 }

@@ -8,7 +8,7 @@
 
 When a building comes down, the first hour is mostly spent finding out what's inside. Today a rescue team typically sends one specialized indoor drone, flown by one pilot, room by room. Mayfly sends several small drones at once. They split the building between them, fly without a pilot each, and merge what they see into one live 3D map. The map marks people, blocked passages and hazards, and the crew gets a route.
 
-Built at Cal Hacks 13.0.
+Built at Cal Hacks 13.0. **Live console: [disaster-swarm.vercel.app](https://disaster-swarm.vercel.app/)** (demo data unless it's pointed at a running simulator; see [Running it](#running-it)).
 
 - [Demo video](#demo-video)
 - [Why this matters](#the-need)
@@ -268,6 +268,14 @@ cd gpucore && pip install maturin && maturin develop --release
 
 # Object detection on the live E58 feed
 ./run_live_feed.sh
+```
+
+### The web console
+
+The console is a TanStack Start app (`ui/apps/web`). The hosted copy at [disaster-swarm.vercel.app](https://disaster-swarm.vercel.app/) runs on demo data. It reads live data from SpacetimeDB at `?stdb=ws://host:3000` if given, else the build's `VITE_STDB_URL` (for example a `wss://` tunnel), else `ws://<page host>:3000`. The 3D viewer address works the same way with `?viewer=` and `VITE_VIEWER_URL`, defaulting to port 8000 on the database's host. For a live mission, serve the console next to the sim (`scripts/console-up.sh`) or run it locally pointed at the sim's machine:
+
+```bash
+cd ui && bun install && cd apps/web && npx vite dev     # http://localhost:3001/live?stdb=ws://<sim host>:3000
 ```
 
 More detail lives next to the code: `gpucore/README.md`, `object_det/README.md`, `vitals/README.md`, `drone_control/control/README.md`, `drone_control/esp32/README.md`. The demo video is a Remotion project in `video/`.
