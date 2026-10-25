@@ -34,3 +34,42 @@
     0 0 0 1px var(--color-line-strong),
     0 1px 3px rgb(0 0 0 / 0.2);
 }
+
+/* Found-so-far panel (landing/pitch.tsx). Motion is off under reduced motion. */
+@keyframes found-ping {
+  0% { transform: scale(1); opacity: 0.55; }
+  100% { transform: scale(2.1); opacity: 0; }
+}
+@keyframes found-sweep {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+@keyframes found-wave {
+  0%, 100% { transform: rotate(0); }
+  20% { transform: rotate(16deg); }
+  40% { transform: rotate(-12deg); }
+  60% { transform: rotate(14deg); }
+  80% { transform: rotate(-6deg); }
+}
+@keyframes found-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.07); }
+}
+@keyframes found-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+@keyframes found-scan {
+  0% { top: 0; opacity: 0; }
+  10%, 90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+.found-ping { animation: found-ping 1.1s ease-out 2; }
+.found-sweep { animation: found-sweep 0.9s ease-out 1; }
+.found-wave { animation: found-wave 1.6s ease-in-out infinite; transform-origin: 70% 90%; }
+.found-breathe { animation: found-breathe 2.8s ease-in-out infinite; }
+.found-blink { animation: found-blink 1.2s ease-in-out infinite; }
+.found-scan { animation: found-scan 2.6s linear 1; }
+@media (prefers-reduced-motion: reduce) {
+  .found-ping, .found-sweep, .found-wave, .found-breathe, .found-blink, .found-scan { animation: none; }
+}

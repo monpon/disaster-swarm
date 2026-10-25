@@ -37,7 +37,7 @@ function SignInPage() {
     const res =
       mode === "in"
         ? await authClient.signIn.email({ email, password })
-        : await authClient.signUp.email({ email, password, name: String(f.get("name")), inviteCode: String(f.get("inviteCode")) } as Parameters<typeof authClient.signUp.email>[0]);
+        : await authClient.signUp.email({ email, password, name: String(f.get("name")) });
     setBusy(false);
     if (res.error) return setError(res.error.message ?? "Something went wrong");
     await navigate({ to: search.redirect });
@@ -50,8 +50,8 @@ function SignInPage() {
       </Link>
       <form onSubmit={submit} className="flex w-full max-w-[380px] flex-col gap-4 rounded-xl bg-white p-6 shadow-[0_0_0_1px_var(--color-line),0_10px_28px_rgb(0_0_0/0.08)]">
         <div className="flex flex-col gap-1">
-          <h1 className="text-[22px] font-semibold tracking-[-0.01em]">{mode === "in" ? "Sign in to the console" : "Create a crew account"}</h1>
-          <p className="text-[13px] text-muted">{mode === "in" ? "Mission control is for crew members only." : "You need the invite code from your station."}</p>
+          <h1 className="text-[22px] font-semibold tracking-[-0.01em]">{mode === "in" ? "Sign in to the console" : "Create an account"}</h1>
+          <p className="text-[13px] text-muted">{mode === "in" ? "Mission control is for crew members only." : "Use your work email. You can sign in right away."}</p>
         </div>
         {mode === "up" && <input name="name" required autoComplete="name" placeholder="Name" aria-label="Name" className={field} />}
         <input name="email" type="email" required autoComplete="email" placeholder="Email" aria-label="Email" className={field} />
@@ -65,7 +65,6 @@ function SignInPage() {
           aria-label="Password"
           className={field}
         />
-        {mode === "up" && <input name="inviteCode" required autoComplete="off" placeholder="Invite code" aria-label="Invite code" className={field} />}
         {error && (
           <p role="alert" className="text-[13px] font-medium text-hazard">
             {error}
@@ -75,7 +74,7 @@ function SignInPage() {
           {mode === "in" ? "Sign in" : "Create account"}
         </Button>
         <button type="button" onClick={() => (setMode(mode === "in" ? "up" : "in"), setError(undefined))} className="text-[13px] font-medium text-orange-edge">
-          {mode === "in" ? "Have an invite code? Create an account" : "Already have an account? Sign in"}
+          {mode === "in" ? "New here? Create an account" : "Already have an account? Sign in"}
         </button>
       </form>
     </div>
