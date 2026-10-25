@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMU Path</title>
+<style>
+  :root { --bg: #111418; --panel: #1b2027; --text: #e6e9ee; --muted: #8a94a3; --path: #4cc2ff; --still: #f2b84b; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px system-ui, sans-serif; }
+  #view { position: fixed; inset: 0; }
+  #ui { position: fixed; left: 12px; right: 12px; bottom: 12px; background: var(--panel); padding: 10px 12px;
+        border-radius: 8px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  #ui input[type=range] { flex: 1; min-width: 160px; }
+  #info { position: fixed; top: 12px; left: 12px; background: var(--panel); padding: 8px 12px; border-radius: 8px;
+          color: var(--muted); max-width: calc(100% - 48px); }
+  #info b { color: var(--text); font-weight: 600; }
+  button, select { background: #2a313b; color: var(--text); border: 1px solid #3a434f; border-radius: 6px; padding: 4px 10px; }
+  .k { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 10px; }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="info">loading…</div>
+<div id="ui">
+  <select id="file"></select>
+  <button id="play">Play</button>
+  <input id="scrub" type="range" min="0" max="0" value="0">
+  <span id="time">0.00 s</span>
+</div>
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
+<script>
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111418);
+// World is z-up (from path.py); three.js is y-up, so rotate the whole world group.
+const world = new THREE.Group();
+world.rotation.x = -Math.PI / 2;
+scene.add(world);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.001, 100);
+camera.position.set(0.6, 0.5, 0.8);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+sun.position.set(1, 2, 1);
+scene.add(sun);
+const grid = new THREE.GridHelper(2, 20, 0x3a434f, 0x232a33);
+grid.rotation.x = Math.PI / 2;
+world.add(grid);
+world.add(new THREE.AxesHelper(0.15));
+
+const board = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.03, 0.008),
+  new THREE.MeshStandardMaterial({ color: 0x2f9e6e }));
+board.add(new THREE.AxesHelper(0.05));
+world.add(board);
+let pathLine = null, trail = null, frames = [];
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+
+function setFrame(i) {
+  const f = frames[i];
+  if (!f) return;
+  board.position.set(...f.p);
+  board.quaternion.set(f.q[1], f.q[2], f.q[3], f.q[0]);
+  trail.geometry.setDrawRange(0, i + 1);
+  document.getElementById('time').textContent = f.t.toFixed(2) + ' s';
+}
+
+async function load(name) {
+  const data = await (await fetch('runs/' + name)).json();
+  frames = data.frames;
+  for (const o of [pathLine, trail]) if (o) world.remove(o);
+  const pts = new Float32Array(frames.flatMap(f => f.p));
+  const colors = new Float32Array(frames.flatMap(f => f.still ? [0.95, 0.72, 0.29] : [0.3, 0.76, 1]));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  pathLine = new THREE.Line(g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.25 }));
+  // WebGL lines are always 1 px wide, so draw the trail as fat points instead.
+  trail = new THREE.Points(g, new THREE.PointsMaterial({ vertexColors: true, size: 5, sizeAttenuation: false }));
+  world.add(pathLine, trail);
+  const s = data.summary;
+  document.getElementById('info').innerHTML =
+    `<b>${name}</b> · ${s.duration_s} s @ ${s.rate_hz} Hz · ` +
+    (s.position_mode === 'highpass' ? '<b>relative motion</b> (no still pauses: drift filtered out, slow travel lost) · ' : '') +
+    `extent ${s.extent_m.map(v => v.toFixed(2)).join(' × ')} m · still ${s.still_pct}%` +
+    `<span class="k" style="background:var(--path)"></span>moving<span class="k" style="background:var(--still)"></span>still (velocity reset)`;
+  const scrub = document.getElementById('scrub');
+  scrub.max = frames.length - 1;
+  scrub.value = frames.length - 1;
+  setFrame(frames.length - 1);
+  g.computeBoundingSphere();
+  const c = g.boundingSphere.center.clone().applyEuler(world.rotation);
+  controls.target.copy(c);
+  camera.position.copy(c).add(new THREE.Vector3(1, 0.8, 1).multiplyScalar(Math.max(0.3, g.boundingSphere.radius * 2.2)));
+}
+
+let playing = false, playStart = 0, playFrom = 0;
+document.getElementById('play').onclick = () => {
+  playing = !playing;
+  document.getElementById('play').textContent = playing ? 'Pause' : 'Play';
+  const scrub = document.getElementById('scrub');
+  if (playing && +scrub.value >= frames.length - 1) scrub.value = 0;
+  playFrom = frames[+scrub.value]?.t ?? 0;
+  playStart = performance.now();
+};
+document.getElementById('scrub').oninput = (e) => { playing = false; document.getElementById('play').textContent = 'Play'; setFrame(+e.target.value); };
+document.getElementById('file').onchange = (e) => load(e.target.value);
+
+function tick() {
+  if (playing && frames.length) {
+    const t = playFrom + (performance.now() - playStart) / 1000;
+    let i = frames.findIndex(f => f.t >= t);
+    if (i < 0) { i = frames.length - 1; playing = false; document.getElementById('play').textContent = 'Play'; }
+    document.getElementById('scrub').value = i;
+    setFrame(i);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+tick();
+
+fetch('runs/runs.json').then(r => r.json()).then(runs => {
+  const sel = document.getElementById('file');
+  for (const r of runs) sel.add(new Option(r, r));
+  if (runs.length) { sel.value = runs[runs.length - 1]; load(sel.value); }
+  else document.getElementById('info').textContent = 'no runs yet: record one, then run path.py';
+});
+</script>
+</body>
+</html>
