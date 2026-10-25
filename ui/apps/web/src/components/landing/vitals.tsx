@@ -8,13 +8,16 @@ const VitalsScene = lazy(() => import("./vitals-scene").then((m) => ({ default: 
 
 const PULSE = 88;
 const PLAY_MS = 6500;
+/** Scrolling this far while the section plays finishes it early. */
+const SCROLL_BOOST_PX = 900;
 
 /**
  * A drone sweeps the room, locks onto someone waving by the wall, and the
- * result is one check mark and one number. Plays on its own when in view.
+ * result is one check mark and one number. Plays on its own when in view;
+ * scrolling past speeds it up so it is locked on by the time you leave.
  */
 export function Vitals() {
-  const { ref, progress } = usePlayOnView<HTMLElement>(PLAY_MS);
+  const { ref, progress } = usePlayOnView<HTMLElement>(PLAY_MS, 0.35, SCROLL_BOOST_PX);
   const lock = Math.min(1, Math.max(0, (progress - 0.58) / 0.08));
   const read = Math.min(1, Math.max(0, (progress - 0.68) / 0.22));
   const done = read >= 1;

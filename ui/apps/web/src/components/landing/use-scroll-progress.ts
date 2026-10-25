@@ -42,11 +42,14 @@ export function range(p: number, from: number, to: number) {
 }
 
 /**
- * Time-based 0..1 progress that plays once the element is on screen and
- * resets when it leaves, so each visit replays. `restart()` replays on demand.
+ * Time-based 0..1 progress that plays once `threshold` of the element is on
+ * screen and resets once it is fully off screen, so each visit replays.
+ * `restart()` replays on demand.
+ * With `scrollBoostPx`, scrolling while it plays also pushes it ahead: that
+ * many pixels of scrolling (either direction) is worth the whole run.
  * With reduced motion it jumps straight to the end.
  */
-export function usePlayOnView<T extends HTMLElement>(durationMs: number, threshold = 0.35) {
+export function usePlayOnView<T extends HTMLElement>(durationMs: number, threshold = 0.35, scrollBoostPx = 0) {
   const ref = useRef<T>(null);
   const [progress, setProgress] = useState(0);
   const [run, setRun] = useState(0);
@@ -56,32 +59,53 @@ export function usePlayOnView<T extends HTMLElement>(durationMs: number, thresho
     const el = ref.current;
     if (!el) return;
     let frame = 0;
-    let start = 0;
+    let last = 0;
+    let p = 0;
+    let lastY = window.scrollY;
+    let boost = 0;
     const tick = (now: number) => {
-      if (!start) start = now;
-      const p = Math.min(1, (now - start) / durationMs);
+      p = Math.min(1, p + (last ? (now - last) / durationMs : 0) + boost);
+      last = now;
+      boost = 0;
       setProgress(p);
       if (p < 1) frame = requestAnimationFrame(tick);
+      else frame = 0;
     };
+    const onScroll = () => {
+      const y = window.scrollY;
+      if (frame && scrollBoostPx) boost += Math.abs(y - lastY) / scrollBoostPx;
+      lastY = y;
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
     const io = new IntersectionObserver(
       ([entry]) => {
-        cancelAnimationFrame(frame);
-        if (entry?.isIntersecting) {
-          if (reduced) return setProgress(1);
-          start = 0;
+        if (!entry) return;
+        if (entry.isIntersecting && entry.intersectionRatio >= threshold) {
+          if (frame || p > 0) return;
+          if (reduced) {
+            p = 1;
+            return setProgress(1);
+          }
+          last = 0;
+          boost = 0;
+          lastY = window.scrollY;
           frame = requestAnimationFrame(tick);
-        } else {
+        } else if (!entry.isIntersecting) {
+          cancelAnimationFrame(frame);
+          frame = 0;
+          p = 0;
           setProgress(0);
         }
       },
-      { threshold },
+      { threshold: [0, threshold] },
     );
     io.observe(el);
     return () => {
       io.disconnect();
+      window.removeEventListener("scroll", onScroll);
       cancelAnimationFrame(frame);
     };
-  }, [durationMs, threshold, reduced, run]);
+  }, [durationMs, threshold, scrollBoostPx, reduced, run]);
 
   return { ref, progress, restart: () => setRun((r) => r + 1) };
 }
