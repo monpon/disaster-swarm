@@ -14,7 +14,7 @@ Built at Cal Hacks 13.0. ▶ **[Watch the demo video (3:52)](https://vimeo.com/1
 |---|---|
 | Demo video | https://vimeo.com/1239251813 (3:52) |
 | Live web console | https://sonic-magenta-5w7whpr.tmp.now/ (reads the live mission from the GX10 through a tunnel) |
-| Live simulator + 3D viewer | https://clouds-msg-diversity-serial.trycloudflare.com/ (served from the GX10) |
+| Live simulator + 3D viewer | https://clouds-msg-diversity-serial.trycloudflare.com/?stdb=wss://aircraft-pressure-deal-michel.trycloudflare.com (served from the GX10; the `?stdb=` part is the database tunnel and is required) |
 | If the live links are down | Both depend on a running sim and a tunnel, so they can be offline. The console then shows demo data. Run it yourself: [Quick start](#quick-start) |
 | Sponsors used | [SpacetimeDB](https://spacetimedb.com) (all live state), [Presage](https://presagetech.com) (vitals, see the honesty notes) |
 
