@@ -54,8 +54,8 @@ function buildDrone() {
 }
 
 /**
- * Standing figure leaning back on a wall, waving. Built facing +z; arms hang
- * from shoulder pivots so they stay attached as they move.
+ * Standing figure leaning back on a wall, waving both arms. Built facing +z;
+ * arms hang from shoulder pivots so they stay attached as they move.
  */
 function buildPerson(skin: THREE.MeshStandardMaterial) {
   const person = new THREE.Group();
@@ -77,31 +77,26 @@ function buildPerson(skin: THREE.MeshStandardMaterial) {
   head.castShadow = true;
   upper.add(torso, head);
 
-  const shoulderY = 0.52;
-  // Resting arm.
-  const restPivot = new THREE.Group();
-  restPivot.position.set(-0.22, shoulderY, 0);
-  restPivot.rotation.z = -0.12;
-  const restArm = capsule(0.055, 0.46, skin);
-  restArm.position.y = -0.29;
-  restPivot.add(restArm);
-  // Waving arm: upper arm out to the side, forearm raised from the elbow.
-  const wavePivot = new THREE.Group();
-  wavePivot.position.set(0.22, shoulderY, 0);
-  const upperArm = capsule(0.055, 0.22, skin);
-  upperArm.position.y = 0.16;
-  wavePivot.add(upperArm);
-  const elbow = new THREE.Group();
-  elbow.position.y = 0.32;
-  const forearm = capsule(0.05, 0.22, skin);
-  forearm.position.y = 0.16;
-  const hand = new THREE.Mesh(new THREE.SphereGeometry(0.065, 12, 10), skin);
-  hand.position.y = 0.34;
-  elbow.add(forearm, hand);
-  wavePivot.add(elbow);
-  upper.add(restPivot, wavePivot);
+  // Each arm: upper arm out to the side, forearm raised from the elbow.
+  const arms = ([1, -1] as const).map((side) => {
+    const shoulder = new THREE.Group();
+    shoulder.position.set(0.22 * side, 0.52, 0);
+    const upperArm = capsule(0.055, 0.22, skin);
+    upperArm.position.y = 0.16;
+    shoulder.add(upperArm);
+    const elbow = new THREE.Group();
+    elbow.position.y = 0.32;
+    const forearm = capsule(0.05, 0.22, skin);
+    forearm.position.y = 0.16;
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.065, 12, 10), skin);
+    hand.position.y = 0.34;
+    elbow.add(forearm, hand);
+    shoulder.add(elbow);
+    upper.add(shoulder);
+    return { side, shoulder, elbow };
+  });
 
-  return { person, wavePivot, elbow };
+  return { person, arms };
 }
 
 /**
@@ -153,7 +148,7 @@ export function VitalsScene({ phase, lock }: { phase: number; lock: number }) {
     scene.add(wall);
 
     const skin = mat(0xdedbd5);
-    const { person, wavePivot, elbow } = buildPerson(skin);
+    const { person, arms } = buildPerson(skin);
     person.position.copy(PERSON_POS);
     person.rotation.y = -0.4; // turn toward the drone
     scene.add(person);
@@ -202,8 +197,12 @@ export function VitalsScene({ phase, lock }: { phase: number; lock: number }) {
       drone.rotation.z = Math.sin(time * 1.6) * 0.025;
       props.forEach((p, i) => (p.rotation.y += dt * (i % 2 ? 38 : -38)));
 
-      wavePivot.rotation.z = -1.15 + Math.sin(time * 5.5) * 0.12;
-      elbow.rotation.z = 1.05 + Math.sin(time * 5.5 + 0.6) * 0.4;
+      // Both arms wave as mirror images, the way people flag down help.
+      for (const { side, shoulder, elbow } of arms) {
+        const w = time * 5.5;
+        shoulder.rotation.z = side * (-1.15 + Math.sin(w) * 0.12);
+        elbow.rotation.z = side * (1.05 + Math.sin(w + 0.6) * 0.4);
+      }
 
       skin.emissive.setHex(ORANGE);
       skin.emissiveIntensity = 0.22 * l;
