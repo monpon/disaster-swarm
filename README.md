@@ -16,7 +16,7 @@ Built at Cal Hacks 13.0. ▶ **[Watch the demo video (3:52)](https://vimeo.com/1
 | Live web console | https://sonic-magenta-5w7whpr.tmp.now/ (reads the live mission from the GX10 through a tunnel) |
 | Live simulator + 3D viewer | https://clouds-msg-diversity-serial.trycloudflare.com/ (served from the GX10) |
 | If the live links are down | Both depend on a running sim and a tunnel, so they can be offline. The console then shows demo data. Run it yourself: [Quick start](#quick-start) |
-| Sponsors used | [SpacetimeDB](https://spacetimedb.com) (all live state), [Presage](https://presagetech.com) (vitals, see the honesty notes) |
+| Sponsors used | [SpacetimeDB](https://spacetimedb.com) (all live state), [Presage](https://presagetech.com) (vitals, see the honesty notes); voice agent: [Gemini](https://ai.google.dev), [Moss](https://moss.dev) (retrieval), [ElevenLabs](https://elevenlabs.io) (speech) |
 
 - [Demo video](#demo-video)
 - [Honesty notes](#honesty-notes-read-before-judging)
@@ -263,6 +263,9 @@ The incumbents make excellent single aircraft: caged airframes that bounce off w
 | **SpacetimeDB** | The whole mission state, including map blobs, camera feeds, events and commands, lives in one SpacetimeDB module that every console subscribes to (`swarm_db/`). |
 | **ASUS / GPU computing** | `gpucore` CUDA kernels and the YOLO26 FP16 service run on the ASUS Ascent GX10. |
 | **AI / computer vision** | YOLO26m detection of people, doors, fire and smoke; TSDF map fusion; frontier planning. |
+| **Moss** | The console's voice agent answers questions about routes to people, past events and how Mayfly works by searching a Moss index of mission documents (findings with routes, recent events, reference notes), warmed when the page loads (`ui/apps/web/src/server/mission-search.ts`). It falls back to keyword search when Moss isn't configured. |
+| **ElevenLabs** | Hands-free speech for the voice agent: ElevenLabs transcribes what the crew says (Scribe) and speaks the agent's answer aloud (Flash v2.5) (`ui/apps/web/src/server/voice-agent.ts`, `lib/use-voice-agent.ts`). Without a key, the browser's own speech recognition and synthesis stand in. |
+| **Gemini** | Gemini is the voice agent's default model (`GEMINI_MODEL`, Claude as an option). With function calling it searches the mission through Moss, changes which classes the drones look for, their confidence thresholds, camera vitals and the human-review threshold, and pauses or resumes the search, then says in one to three spoken sentences what it did. |
 
 ## Quick start
 
