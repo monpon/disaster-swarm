@@ -2,7 +2,7 @@
 name = "gpucore"
 version = "0.1.0"
 edition = "2021"
-description = "GPU core of the disaster-swarm simulator: camera, map fusion, alignment, TSDF mesher, radio (CUDA via NVRTC)"
+description = "GPU core of the Mayfly simulator: camera, map fusion, alignment, TSDF mesher, radio (CUDA via NVRTC)"
 
 [lib]
 name = "gpucore"

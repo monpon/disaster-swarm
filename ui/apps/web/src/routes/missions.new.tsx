@@ -14,7 +14,7 @@ export const Route = createFileRoute("/missions/new")({
 });
 
 function NewMissionPage() {
-  const [query, setQuery] = useState("418 Elm");
+  const [query, setQuery] = useState("12 Example");
   const [picked, setPicked] = useState("a1");
   const [type, setType] = useState<(typeof missionTypes)[number]>("Structural collapse");
   const results = useMemo(() => {
@@ -144,10 +144,7 @@ function NewMissionPage() {
         </aside>
         <div className="relative min-w-0 flex-1 bg-[#f0f0ee]">
           <Stage width={968} height={848} fit="cover">
-            <img src="/assets/streets.png" alt="Street map around 418 Elm St" width={968} height={848} className="absolute inset-0" draggable={false} />
-            <span className="absolute text-[11px] font-semibold tracking-[0.04em] text-[#8a8a86]" style={{ left: 190, top: 293 }}>
-              ELM ST
-            </span>
+            <img src="/assets/streets.png" alt="Street map around the selected building" width={968} height={848} className="absolute inset-0" draggable={false} />
             <span className="absolute text-[11px] font-semibold tracking-[0.04em] text-[#b0784a]" style={{ left: 518, top: 8 }}>
               S 5TH ST
             </span>
