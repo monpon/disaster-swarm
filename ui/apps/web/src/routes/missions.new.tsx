@@ -6,15 +6,18 @@ import { useMemo, useState } from "react";
 
 import { AttributeRow, TrustLegend } from "@/components/building/trust";
 import { Mark } from "@/components/icons";
+import { ConsoleGate } from "@/components/shell/console-gate";
 import { Stage } from "@/components/map/stage";
 import { elmStreet } from "@/lib/building";
 import { addressResults, missionTypeKey, missionTypes, recentMissions } from "@/lib/mock";
-import { requireUser } from "@/lib/session";
 
 export const Route = createFileRoute("/missions/new")({
-  beforeLoad: ({ location }) => requireUser(location.href),
   head: () => ({ meta: [{ title: "New mission" }] }),
-  component: NewMissionPage,
+  component: () => (
+    <ConsoleGate>
+      <NewMissionPage />
+    </ConsoleGate>
+  ),
 });
 
 const layers = ["Map", "Satellite", "Parcels"] as const;

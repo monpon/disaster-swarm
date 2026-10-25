@@ -1,4 +1,4 @@
-import { MossClient, type DocumentInfo } from "@inferedge/moss";
+import type { DocumentInfo, MossClient } from "@inferedge/moss";
 
 /**
  * Retrieval for the voice agent: what the mission knows (findings with their routes, the event log) plus Mayfly's
@@ -37,7 +37,12 @@ const synced = new Map<string, string>();
 export const hasMoss = () => !!(process.env.MOSS_PROJECT_ID && process.env.MOSS_PROJECT_KEY) && !mossDown;
 
 async function sync(docs: DocumentInfo[]): Promise<void> {
-  moss ??= new MossClient(process.env.MOSS_PROJECT_ID!, process.env.MOSS_PROJECT_KEY!);
+  // Loaded on first use: its ONNX runtime is a native binary that serverless hosts do not ship, and importing it at
+  // the top would take every route down. If it fails to load, searchMission falls back to keyword search.
+  if (!moss) {
+    const { MossClient } = await import("@inferedge/moss");
+    moss = new MossClient(process.env.MOSS_PROJECT_ID!, process.env.MOSS_PROJECT_KEY!);
+  }
   const changed = docs.filter((d) => synced.get(d.id) !== d.text);
   if (!mossReady) {
     mossReady = (async () => {

@@ -17,11 +17,12 @@
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/react-router": "^1.170.32",
     "@tanstack/react-start": "^1.168.49",
-    "better-auth": "^1.7.12",
     "lucide-react": "catalog:",
     "nitro": "3.0.260903-beta",
+    "oidc-client-ts": "^3.5.0",
     "react": "catalog:",
     "react-dom": "catalog:",
+    "react-oidc-context": "^3.3.1",
     "spacetimedb": "^2.13.0",
     "tailwindcss": "catalog:",
     "three": "0.170.0"
