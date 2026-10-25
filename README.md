@@ -1,5 +1,5 @@
-# disaster-swarm
-Calhacks 13 submission
+# Mayfly
+Cal Hacks 13.0 submission. When every second counts, find them faster.
 
 Search-and-rescue drone swarm simulator. A single central master computer orchestrates
 every drone over a lossy, delayed radio link. The browser viewer shows two synchronized

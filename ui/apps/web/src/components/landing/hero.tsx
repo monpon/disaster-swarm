@@ -9,7 +9,7 @@ export function Hero() {
       <h1 className="text-center text-[44px] leading-[0.98] font-bold tracking-[-0.045em] sm:text-[64px] lg:text-[88px]">
         When Every Second Counts,
         <br />
-        <span className="text-orange">Send the Swarm.</span>
+        <span className="text-orange">Find Them Faster.</span>
       </h1>
       <p className="max-w-[720px] text-center text-lg leading-8 text-muted md:text-[20px] md:leading-[31px]">
         Instead of one expensive drone searching alone, we send a team of small, smart drones. They fly on their own, search together, and build a map to help
