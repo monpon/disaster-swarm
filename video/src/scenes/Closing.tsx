@@ -79,7 +79,7 @@ export function Closing() {
             transform: `translateY(${(1 - tag) * 20}px)`,
           }}
         >
-          Find people faster.
+          Send the swarm.
         </span>
       </AbsoluteFill>
       <AbsoluteFill style={{ background: "#000", opacity: interpolate(t, [PART_D_LEN - 0.5, PART_D_LEN], [0, 1], clamp) }} />
