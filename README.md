@@ -38,16 +38,6 @@ Built at Cal Hacks 13.0. ▶ **[Watch the demo video (3:52)](https://vimeo.com/1
 
 ---
 
-## Honesty notes (read before judging)
-
-- Everything in the live view is a **simulation**. The simulator is the main way to run Mayfly.
-- **Vitals are simulated.** The real Presage SDK was tested only on rendered video clips with an injected pulse (`vitals/`).
-  It needs a real face and shoulders shot, so it does not run on the simulated people.
-- The **flight controller has been tested against a fake drone and has never flown the real drone.** Stick directions and RC
-  mode are unverified on hardware.
-- The real drone reaches the database only while the ESP32 relay board is attached and joined to the GX10's network.
-- The IMU path is dead reckoning from a cheap sensor. It drifts, and is a demonstration, not navigation.
-
 In more detail:
 
 | Part | Status |
