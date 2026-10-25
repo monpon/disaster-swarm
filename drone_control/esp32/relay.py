@@ -28,12 +28,18 @@ PORTS = {"video": (8080, 8080), "cmd": (8090, 8090)}   # kind: (listen port, dro
 TELEMETRY_PORT = 9100
 SESSION_IDLE_MS = 30000
 USE_IMU = True
+IMU_SDA, IMU_SCL = 11, 12   # current wiring (an I2C sweep found the MPU here, not on 8/9)
+IMU_PORT = 9101             # raw IMU stream to the most recent client
+IMU_HZ = 100
+IMU_BATCH = 10              # samples per datagram -> 10 datagrams/s
+IMU_REC = 18                # bytes per sample: t_us (u32 LE, ticks_us so wraps at 2**30) + 14-byte
+                            # register dump (accel, temp, gyro; big-endian int16)
 
 try:
     if not USE_IMU:
         raise OSError("imu disabled")
     from mpu import MPU
-    imu = MPU()
+    imu = MPU(sda=IMU_SDA, scl=IMU_SCL)
     imu.calibrate()
     print("IMU ok, WHO_AM_I 0x%02x" % imu.who)
 except Exception as e:     # no IMU wired: telemetry just omits it
@@ -100,6 +106,41 @@ ring_w = [0]
 ring_r = [0]
 ring_max = [0]
 RETRY_ERRNOS = (errno.ENOMEM, errno.EAGAIN, 12, 11, 105)   # no buffer space / try again
+imu_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+imu_buf = bytearray(IMU_REC * IMU_BATCH)   # preallocated: GC is off between ticks
+imu_mv = memoryview(imu_buf)
+imu_n = 0
+imu_next = time.ticks_us()
+c["imu_samples"] = c["imu_pkts"] = c["imu_errors"] = 0
+
+
+def imu_sample():
+    """Read one IMU sample into the batch; send the batch when full. No allocation on the happy path."""
+    global imu_n, imu_next
+    now = time.ticks_us()
+    if time.ticks_diff(now, imu_next) < 0:
+        return
+    imu_next = time.ticks_add(imu_next, 1000000 // IMU_HZ)
+    if time.ticks_diff(now, imu_next) > 0:       # fell behind (busy loop): resync, don't burst
+        imu_next = time.ticks_add(now, 1000000 // IMU_HZ)
+    o = imu_n * IMU_REC
+    try:
+        imu.i2c.readfrom_mem_into(imu.addr, 0x3B, imu_mv[o + 4:o + IMU_REC])
+    except OSError:
+        c["imu_errors"] += 1                     # loose wire: skip the sample, keep relaying
+        return
+    t = now & 0xFFFFFFFF
+    imu_buf[o], imu_buf[o + 1], imu_buf[o + 2], imu_buf[o + 3] = t & 255, (t >> 8) & 255, (t >> 16) & 255, t >> 24
+    imu_n += 1
+    c["imu_samples"] += 1
+    if imu_n == IMU_BATCH:
+        imu_n = 0
+        if last_client[0]:
+            try:
+                imu_sock.sendto(imu_buf, (last_client[0], IMU_PORT))
+                c["imu_pkts"] += 1
+            except OSError:
+                c["dropped"] += 1
 
 
 def decode_rc(d):
@@ -257,6 +298,8 @@ while True:
                     if rc:
                         c["rc_pkts"] += 1
                         last_rc[0], last_rc[1] = rc, time.ticks_ms()
+    if imu:
+        imu_sample()
     now = time.ticks_ms()
     gap = time.ticks_diff(now, last_loop)
     last_loop = now
