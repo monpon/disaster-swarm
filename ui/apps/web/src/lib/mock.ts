@@ -186,6 +186,9 @@ export const recentMissions = [
 
 export const missionTypes = ["Structural collapse", "Earthquake", "Welfare check", "Gas leak", "Other"] as const;
 
+/** sessionStorage key carrying the type picked on the new-mission page into the console. */
+export const missionTypeKey = "swarm.missionType";
+
 export const detectionClasses = [
   { id: "person", label: "Person", color: "var(--color-person)", enabled: true, threshold: 0.6, speak: true },
   { id: "door", label: "Door, open or closed", color: "var(--color-door)", enabled: true, threshold: 0.5, speak: false },

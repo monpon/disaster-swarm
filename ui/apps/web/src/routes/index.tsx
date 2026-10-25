@@ -13,7 +13,7 @@ import { useStory } from "@/components/landing/story";
 import { Vitals } from "@/components/landing/vitals";
 
 export const Route = createFileRoute("/")({
-  head: () => ({ meta: [{ title: "Swarm: when every second counts, send the swarm" }] }),
+  head: () => ({ meta: [{ title: "Mayfly: when every second counts, find people faster" }] }),
   component: Landing,
 });
 
@@ -24,7 +24,7 @@ function Landing() {
       <header className="sticky top-0 z-30 flex h-[68px] items-center gap-6 border-b border-line-soft bg-white/90 px-4 backdrop-blur md:px-16">
         <Link to="/" className="flex items-center gap-2.5">
           <Mark />
-          <span className="text-lg font-bold tracking-[-0.02em]">Swarm</span>
+          <span className="text-lg font-bold tracking-[-0.02em]">Mayfly</span>
         </Link>
         <div className="flex-1" />
         <nav className="hidden items-center gap-7 text-sm font-medium text-[#3a3a38] md:flex">
@@ -57,7 +57,7 @@ function Landing() {
       <section className="px-4 pb-16 md:px-16">
         <div className="flex flex-col gap-8 rounded-3xl bg-[linear-gradient(135deg,#ff6a2e_0%,#e8480c_100%)] px-8 py-14 shadow-[inset_0_1px_0_rgb(255_255_255/0.25),0_4px_0_var(--color-orange-deep)] md:flex-row md:items-center md:gap-12 md:px-[72px] md:py-16">
           <div className="flex flex-1 flex-col gap-3">
-            <h2 className="text-[40px] leading-[1.05] font-bold tracking-[-0.035em] text-white md:text-[52px]">Send the swarm.</h2>
+            <h2 className="text-[40px] leading-[1.05] font-bold tracking-[-0.035em] text-white md:text-[52px]">Find people faster.</h2>
             <p className="text-lg leading-7 text-white/90">Open the console and watch a search play out, room by room, all at once.</p>
           </div>
           <div className="flex flex-col items-stretch gap-3">
@@ -79,7 +79,7 @@ function Landing() {
         <div className="flex flex-1 flex-col gap-3">
           <span className="flex items-center gap-2.5">
             <Mark />
-            <span className="text-[17px] font-bold tracking-[-0.02em]">Swarm</span>
+            <span className="text-[17px] font-bold tracking-[-0.02em]">Mayfly</span>
           </span>
           <span className="text-sm text-muted">Drone swarms that help rescuers find people faster.</span>
         </div>

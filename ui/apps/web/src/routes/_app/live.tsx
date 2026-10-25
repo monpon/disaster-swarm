@@ -3,7 +3,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@swarm/ui/
 import { Segmented } from "@swarm/ui/components/segmented";
 import { createFileRoute } from "@tanstack/react-router";
 import { ChevronDown, ChevronUp, Megaphone } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { CrewChannel } from "@/components/live/crew-channel";
 import { FeedStrip } from "@/components/live/feed-strip";
@@ -12,7 +12,7 @@ import { ScanMap } from "@/components/live/scan-map";
 import { Timeline } from "@/components/live/timeline";
 import { ConsoleBody } from "@/components/shell/console-body";
 import { TopBar } from "@/components/shell/top-bar";
-import { mission } from "@/lib/mock";
+import { mission, missionTypeKey } from "@/lib/mock";
 import { usePaneCollapse } from "@/lib/use-pane-collapse";
 
 export const Route = createFileRoute("/_app/live")({
@@ -26,6 +26,11 @@ function LivePage() {
   const [mode, setMode] = useState<SwarmMode>("explore");
   const [drone, setDrone] = useState("D2");
   const [finding, setFinding] = useState<string | null>("p1");
+  const [missionType, setMissionType] = useState(mission.type);
+  useEffect(() => {
+    const picked = sessionStorage.getItem(missionTypeKey);
+    if (picked) setMissionType(picked);
+  }, []);
   const feeds = usePaneCollapse();
   const crew = usePaneCollapse();
 
@@ -61,7 +66,7 @@ function LivePage() {
       >
         <button type="button" className="flex h-[34px] items-center gap-2 rounded-lg px-2.5 shadow-[inset_0_0_0_1px_var(--color-line)] hover:bg-panel">
           <span className="text-sm font-semibold">{mission.address}</span>
-          <span className="text-[13px] text-muted">{mission.type}</span>
+          <span className="text-[13px] text-muted">{missionType}</span>
           <ChevronDown className="size-3 text-muted" />
         </button>
         <span className="flex items-center gap-1.5">

@@ -1,0 +1,295 @@
+{
+ "_": "Narration cue sheet. at = absolute seconds in the full cut. Part B starts at 98.3, Part C at 176.3, Part D at 204.3.",
+ "lines": [
+  {
+   "scene": "1 Problem",
+   "at": 0.3,
+   "text": "Imagine this."
+  },
+  {
+   "scene": "1 Problem",
+   "at": 1.54,
+   "text": "An earthquake strikes and a building is severely damaged."
+  },
+  {
+   "scene": "1 Problem",
+   "at": 4.72,
+   "text": "People are trapped inside."
+  },
+  {
+   "scene": "1 Problem",
+   "at": 6.39,
+   "text": "But nobody knows where they are."
+  },
+  {
+   "scene": "1 Problem",
+   "at": 8.3,
+   "text": "Rescue teams arrive. They need to find those people, and they need to find them FAST."
+  },
+  {
+   "scene": "1 Problem",
+   "at": 12.91,
+   "text": "But there's a problem."
+  },
+  {
+   "scene": "1 Problem",
+   "at": 14.33,
+   "text": "Nobody knows what's inside."
+  },
+  {
+   "scene": "1 Problem",
+   "at": 16.09,
+   "text": "And every second spent searching could mean a life lost."
+  },
+  {
+   "scene": "2 Existing limitations",
+   "at": 19.3,
+   "text": "Today, rescue teams use a big, bulky, specialized drone to search dangerous buildings."
+  },
+  {
+   "scene": "2 Existing limitations",
+   "at": 25.36,
+   "text": "But mapping an entire building with just one drone is SLOW,"
+  },
+  {
+   "scene": "2 Existing limitations",
+   "at": 28.74,
+   "text": "these drones are EXPENSIVE,"
+  },
+  {
+   "scene": "2 Existing limitations",
+   "at": 30.3,
+   "text": "and teams often have just ONE or TWO available."
+  },
+  {
+   "scene": "2 Existing limitations",
+   "at": 32.89,
+   "text": "It also takes time that victims do not have."
+  },
+  {
+   "scene": "3 Breakthrough",
+   "at": 36.3,
+   "text": "So we asked ourselves..."
+  },
+  {
+   "scene": "3 Breakthrough",
+   "at": 38.02,
+   "text": "What if we could search an ENTIRE building... in a fraction of the time?"
+  },
+  {
+   "scene": "3 Breakthrough",
+   "at": 42.04,
+   "text": "Not with ONE drone."
+  },
+  {
+   "scene": "3 Breakthrough",
+   "at": 43.34,
+   "text": "Not with TWO."
+  },
+  {
+   "scene": "3 Breakthrough",
+   "at": 44.34,
+   "text": "But with an ENTIRE SWARM of small, affordable drones that FLY THEMSELVES!"
+  },
+  {
+   "scene": "3 Breakthrough",
+   "at": 49.04,
+   "text": "Introducing SWARM!"
+  },
+  {
+   "scene": "4 How Swarm works",
+   "at": 50.8,
+   "text": "Our swarm spreads out, searching different parts of the building AT THE SAME TIME!"
+  },
+  {
+   "scene": "4 How Swarm works",
+   "at": 54.9,
+   "text": "No need for someone to fly each drone."
+  },
+  {
+   "scene": "4 How Swarm works",
+   "at": 57.02,
+   "text": "And everything they see comes together into ONE LIVE 3D MAP!"
+  },
+  {
+   "scene": "4 How Swarm works",
+   "at": 60.39,
+   "text": "It shows rescuers where people are trapped,"
+  },
+  {
+   "scene": "4 How Swarm works",
+   "at": 62.84,
+   "text": "in fact, it tracks their vitals using Presage,"
+  },
+  {
+   "scene": "4 How Swarm works",
+   "at": 65.46,
+   "text": "it shows where paths are blocked,"
+  },
+  {
+   "scene": "4 How Swarm works",
+   "at": 67.2,
+   "text": "and where danger lies."
+  },
+  {
+   "scene": "5 Advantages",
+   "at": 69.8,
+   "text": "Here's what changes. We now have:"
+  },
+  {
+   "scene": "5 Advantages",
+   "at": 71.8,
+   "text": "FASTER SEARCHES! Because many drones explore at once."
+  },
+  {
+   "scene": "5 Advantages",
+   "at": 75.01,
+   "text": "LOWER COSTS! Because we use small, affordable drones sharing one powerful computer."
+  },
+  {
+   "scene": "5 Advantages",
+   "at": 79.93,
+   "text": "AND NO PILOT FOR EVERY DRONE! Because they are autonomous."
+  },
+  {
+   "scene": "6 Research",
+   "at": 84.3,
+   "text": "And research backs this up!"
+  },
+  {
+   "scene": "6 Research",
+   "at": 85.98,
+   "text": "A 2024 study published in Sensors found that collaborative robots reduced indoor mapping time by nearly 50%!"
+  },
+  {
+   "scene": "6 Research",
+   "at": 93.15,
+   "text": "On the other hand, specialized drones can cost way up to $30,000 EACH!"
+  },
+  {
+   "scene": "7 Homepage",
+   "at": 98.6,
+   "text": "But enough talking. Let's dive into the demonstration!"
+  },
+  {
+   "scene": "7 Homepage",
+   "at": 101.23,
+   "text": "We've turned this idea into a platform designed to make search-and-rescue operations faster, safer, and smarter."
+  },
+  {
+   "scene": "8 Homepage scroll",
+   "at": 107.9,
+   "text": "From sending out autonomous drones to tracking their progress, everything is designed to help rescue teams act quickly."
+  },
+  {
+   "scene": "8 Homepage scroll",
+   "at": 114.46,
+   "text": "And the best part? Rescuers can manage everything from one place."
+  },
+  {
+   "scene": "9 Mission mode",
+   "at": 118.9,
+   "text": "So, let's see it in action!"
+  },
+  {
+   "scene": "10 Create mission",
+   "at": 121.9,
+   "text": "First, we select the building and the type of emergency."
+  },
+  {
+   "scene": "11 Launch",
+   "at": 126.9,
+   "text": "And with one click, we launch our FOUR autonomous drones!"
+  },
+  {
+   "scene": "12 Dashboard",
+   "at": 131.9,
+   "text": "Now, this is where the rescue team monitors the entire mission!"
+  },
+  {
+   "scene": "13 Four feeds",
+   "at": 136.2,
+   "text": "Here, you can see all four drones exploring different parts of the building AT THE SAME TIME!"
+  },
+  {
+   "scene": "14 3D map",
+   "at": 142.0,
+   "text": "And everything they see comes together into ONE live 3D map, showing the building's layout and how much we've explored!"
+  },
+  {
+   "scene": "15 Survivor",
+   "at": 149.0,
+   "text": "And look! We've detected a potential survivor!"
+  },
+  {
+   "scene": "15 Survivor",
+   "at": 151.77,
+   "text": "We can even see their estimated breathing rate and pulse using Presage!"
+  },
+  {
+   "scene": "16 Hazards",
+   "at": 156.6,
+   "text": "As we scroll, we can also see dangers detected along the way, like blocked passages, closed doors, and gas cylinders!"
+  },
+  {
+   "scene": "17 Crew",
+   "at": 164.4,
+   "text": "And here's the best part!"
+  },
+  {
+   "scene": "17 Crew",
+   "at": 165.85,
+   "text": "We can send this information directly to the rescue crew, helping them decide where to go!"
+  },
+  {
+   "scene": "18 Handoff",
+   "at": 171.2,
+   "text": "But how does all of this work behind the scenes?"
+  },
+  {
+   "scene": "18 Handoff",
+   "at": 173.79,
+   "text": "Here's our technical team to explain!"
+  },
+  {
+   "scene": "C1 Hardware",
+   "at": 176.6,
+   "text": "Each drone is a cheap E58 quadcopter. An ESP32-S3 relay streams its camera over Wi-Fi to one GPU computer."
+  },
+  {
+   "scene": "C2 Brain",
+   "at": null,
+   "text": "Our Rust and CUDA core fuses every view into one shared 3D map, and plans each drone's next move."
+  },
+  {
+   "scene": "C2 Brain",
+   "at": null,
+   "text": "YOLO26 spots people, doors and fire."
+  },
+  {
+   "scene": "C3 Console",
+   "at": null,
+   "text": "It all syncs through SpacetimeDB to the console. The full swarm runs in our simulator; our real drone streams live today."
+  },
+  {
+   "scene": "C4 Roadmap",
+   "at": null,
+   "text": "Next: real swarm flights, and robots like Boston Dynamics Spot."
+  },
+  {
+   "scene": "D Closing",
+   "at": 204.6,
+   "text": "When lives are on the line..."
+  },
+  {
+   "scene": "D Closing",
+   "at": 206.62,
+   "text": "EVERY SECOND COUNTS!"
+  },
+  {
+   "scene": "D Closing",
+   "at": 208.32,
+   "text": "SWARM. SEND THE SWARM!"
+  }
+ ]
+}
