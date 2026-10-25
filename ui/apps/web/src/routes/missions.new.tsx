@@ -8,7 +8,7 @@ import { AttributeRow, TrustLegend } from "@/components/building/trust";
 import { Mark } from "@/components/icons";
 import { Stage } from "@/components/map/stage";
 import { elmStreet } from "@/lib/building";
-import { addressResults, missionTypes, recentMissions } from "@/lib/mock";
+import { addressResults, missionTypeKey, missionTypes, recentMissions } from "@/lib/mock";
 import { requireUser } from "@/lib/session";
 
 export const Route = createFileRoute("/missions/new")({
@@ -135,7 +135,15 @@ function NewMissionPage() {
             <Button size="lg" render={<Link to="/" />} nativeButton={false}>
               Cancel
             </Button>
-            <Button variant="primary" size="lg" className="flex-1" disabled={!chosen} render={<Link to="/setup" />} nativeButton={false}>
+            <Button
+              variant="primary"
+              size="lg"
+              className="flex-1"
+              disabled={!chosen}
+              onClick={() => sessionStorage.setItem(missionTypeKey, type)}
+              render={<Link to="/setup" />}
+              nativeButton={false}
+            >
               Continue to setup
               <ArrowRight />
             </Button>

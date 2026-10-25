@@ -1,0 +1,16 @@
+node_modules/
+out/
+rec/take/
+rec/clip-*/
+rec/chk/
+tools/.venv/
+tools/voices/
+# Large media kept out of git (regenerate with the steps in README.md, or share separately)
+public/rec/
+public/audio/
+public/stock/*.mp4
+vo/real/*16k.wav
+rec/broll/
+rec/*.mp4
+rec/probe*.mjs
+rec/probe.png
