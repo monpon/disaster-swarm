@@ -14,7 +14,7 @@ import { TopBar } from "@/components/shell/top-bar";
 import { fleet, mission } from "@/lib/mock";
 
 export const Route = createFileRoute("/_app/setup")({
-  head: () => ({ meta: [{ title: `Mission setup: ${mission.address}` }] }),
+  head: () => ({ meta: [{ title: "Mission setup" }] }),
   component: SetupPage,
 });
 

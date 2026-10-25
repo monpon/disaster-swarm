@@ -21,6 +21,6 @@ fi
 if ! curl -s -m 2 -o /dev/null http://127.0.0.1:8000/; then
   echo "starting the simulator server (publishing into SpacetimeDB)"
   cd "$ROOT/sim" && source .venv/bin/activate
-  STDB_URL=http://127.0.0.1:3000 setsid nohup uvicorn disaster_sim.server:app --host 0.0.0.0 --port 8000 > "$HOME/disaster-swarm-server.log" 2>&1 < /dev/null &
+  STDB_URL=http://127.0.0.1:3000 setsid nohup uvicorn disaster_sim.server:app --host 0.0.0.0 --port 8000 > "$HOME/mayfly-server.log" 2>&1 < /dev/null &
 fi
 echo "ready: http://$(hostname -I | awk '{print $1}'):8000/?source=db"

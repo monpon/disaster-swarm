@@ -34,8 +34,8 @@ export interface Drone {
 }
 
 export const mission = {
-  address: "418 Elm St",
-  city: "Springfield, IL 62704",
+  address: "Demo site",
+  city: "Simulated site",
   type: "Structural collapse",
   elapsed: "04:12",
   coverage: 62,
@@ -172,9 +172,9 @@ export const timelineEvents = [
 ];
 
 export const addressResults = [
-  { id: "a1", street: "418 Elm St", city: "Springfield, IL 62704", distance: "1.2 mi" },
-  { id: "a2", street: "418 Elm Ave", city: "Chatham, IL 62629", distance: "9.8 mi" },
-  { id: "a3", street: "418 W Elmwood Dr", city: "Springfield, IL 62711", distance: "4.1 mi" },
+  { id: "a1", street: "12 Example St", city: "Anytown, ST 00000", distance: "1.2 mi" },
+  { id: "a2", street: "12 Example Ave", city: "Otherville, ST 00001", distance: "9.8 mi" },
+  { id: "a3", street: "12 W Example Dr", city: "Anytown, ST 00002", distance: "4.1 mi" },
   { id: "a4", street: "1120 Monroe St", city: "Springfield, IL 62703", distance: "2.4 mi" },
 ];
 

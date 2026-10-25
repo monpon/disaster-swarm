@@ -1,7 +1,7 @@
-# disaster-swarm
+# Mayfly
 Calhacks 13 submission
 
-Search-and-rescue drone swarm simulator. A single central master computer orchestrates
+Mayfly: search-and-rescue drone swarm simulator. A single central master computer orchestrates
 every drone over a lossy, delayed radio link. The browser viewer shows two synchronized
 3D views side by side: the real world with drones flying (left) and the map the master
 has fused from drone uplinks, built live (right).

@@ -1,4 +1,4 @@
-//! swarm_db: the live state of the disaster-swarm simulation, served to every viewer by subscription.
+//! swarm_db: the live state of the Mayfly simulation, served to every viewer by subscription.
 //!
 //! One generic table, `entity`, holds everything keyed by a path-like string ("drone/3", "metrics", "plan/1", "mesh/812",
 //! ...): `text` carries JSON, `data` carries binary payloads (rasters, mesh chunks, point blocks). The simulator is the only

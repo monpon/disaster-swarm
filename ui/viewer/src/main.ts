@@ -34,7 +34,7 @@ if (embed) {
   document.documentElement.style.background = "transparent";
 }
 const viewsEl = document.getElementById("views")!;
-const real = createStage(document.getElementById("view-real")!);
+const real = createStage(document.getElementById("view-real")!, undefined, false, true);
 const map = createStage(document.getElementById("view-map")!, "#06080d", embed);
 for (const st of [real, map]) st.renderer.localClippingEnabled = true;
 map.renderer.shadowMap.enabled = false;

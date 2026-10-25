@@ -1,6 +1,6 @@
-# Swarm console (UI)
+# Mayfly console (UI)
 
-Web console for the disaster swarm: mission setup, the live 3D map with drone feeds and findings, fleet configuration, settings, and a landing page. Built from the "v2 — orange" Paper designs.
+Web console for Mayfly: mission setup, the live 3D map with drone feeds and findings, fleet configuration, settings, and a landing page. Built from the "v2 — orange" Paper designs.
 
 Data is mocked in `apps/web/src/lib/mock.ts` until the console is wired to the edge server.
 

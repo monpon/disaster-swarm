@@ -42,7 +42,7 @@ export function Audio() {
                 {speaker === "swarm" ? <Ear className="size-5" /> : <Mic className="size-5" />}
               </span>
               <span className="flex flex-col">
-                <span className="text-sm font-semibold">{speaker === "swarm" ? "Swarm speaking" : "Crew speaking"}</span>
+                <span className="text-sm font-semibold">{speaker === "swarm" ? "Mayfly speaking" : "Crew speaking"}</span>
                 <span className="text-xs text-[#a3a3a0]">Engine 7 crew channel</span>
               </span>
             </div>
@@ -68,7 +68,7 @@ export function Audio() {
                 )}
               >
                 <span className={cn("text-xs font-semibold", line.from === "swarm" ? "text-[#ff8a5c]" : "text-muted")}>
-                  {line.from === "swarm" ? "Swarm" : "Capt. Reyes"}
+                  {line.from === "swarm" ? "Mayfly" : "Capt. Reyes"}
                 </span>
                 <span className="text-[15px] leading-[22px] md:text-base">{line.text}</span>
               </li>

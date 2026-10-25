@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 import { decodeB64, type BuildingInfo } from "../types";
+import { realTint, materialTexture } from "./textures";
 import { VoxelLayer } from "./voxels";
 
 const ASPHALT = 1;
@@ -15,19 +16,23 @@ export async function inflate(b64: string): Promise<Uint8Array> {
 export function siteDressing(b: BuildingInfo): THREE.Group {
   const g = new THREE.Group();
   const [sx, sy] = b.shape;
-  const asphalt = b.palette[ASPHALT].rgb;
+  const gw = sx + 120, gh = sy + 120;
+  const asphaltTex = materialTexture("asphalt").clone();   // weathered asphalt: a grain tile every 2 m instead of one flat colour
+  asphaltTex.wrapS = asphaltTex.wrapT = THREE.RepeatWrapping;
+  asphaltTex.repeat.set(gw / 2, gh / 2);
+  asphaltTex.needsUpdate = true;
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(sx + 120, sy + 120),
-    new THREE.MeshStandardMaterial({ color: new THREE.Color(asphalt[0] / 255, asphalt[1] / 255, asphalt[2] / 255), roughness: 1 }),
+    new THREE.PlaneGeometry(gw, gh),
+    new THREE.MeshStandardMaterial({ color: realTint(b.palette[ASPHALT]), map: asphaltTex, roughness: 0.95 }),
   );
   ground.position.set(sx / 2, sy / 2, 1);
   ground.receiveShadow = true;
   g.add(ground);
-  const grid = new THREE.GridHelper(Math.max(sx, sy) + 40, (Math.max(sx, sy) + 40) / 8, "#3b4254", "#2a303d");
+  const grid = new THREE.GridHelper(Math.max(sx, sy) + 40, (Math.max(sx, sy) + 40) / 8, "#4a5060", "#3a404d");
   grid.rotation.x = Math.PI / 2;
   grid.position.set(sx / 2, sy / 2, 1.01);
   (grid.material as THREE.Material).transparent = true;
-  (grid.material as THREE.Material).opacity = 0.35;
+  (grid.material as THREE.Material).opacity = 0.12;
   g.add(grid);
 
   const padMat = new THREE.MeshStandardMaterial({ color: "#2f3a4f", roughness: 0.8 });
@@ -76,7 +81,7 @@ export class RealView {
     const [sx, sy, sz] = b.shape;
     const layer = new VoxelLayer(b.palette, b.shape, new Set([SURVIVOR]));
     const c = new THREE.Color();
-    const tints = b.palette.map((p) => new THREE.Color(p.rgb[0] / 255, p.rgb[1] / 255, p.rgb[2] / 255));
+    const tints = b.palette.map((p) => realTint(p));
     const at = (x: number, y: number, z: number) =>
       x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz ? 0 : vox[(x * sy + y) * sz + z];
     for (let x = 0; x < sx; x++) {
@@ -86,7 +91,14 @@ export class RealView {
           if (m === 0 || m === ASPHALT) continue;
           if (at(x + 1, y, z) && at(x - 1, y, z) && at(x, y + 1, z) && at(x, y - 1, z) && at(x, y, z + 1) && (z === 0 || at(x, y, z - 1)))
             continue; // fully enclosed
-          layer.set((x * sy + y) * sz + z, m, c.copy(tints[m]));
+          // a little ambient occlusion (voxels tucked into corners and under overhangs are darker) and a stable per-voxel
+          // variation, so large surfaces do not read as one flat colour
+          let solid = 0;
+          for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) if (dx || dy || dz) solid += at(x + dx, y + dy, z + dz) ? 1 : 0;
+          const ao = 1 - 0.4 * Math.max(0, solid / 26 - 0.4);
+          const h = Math.imul(Math.imul(x + 1, 73856093) ^ Math.imul(y + 1, 19349663) ^ Math.imul(z + 1, 83492791), 2654435761) >>> 0;
+          const jitter = 0.94 + 0.12 * (h / 4294967296);
+          layer.set((x * sy + y) * sz + z, m, c.copy(tints[m]).multiplyScalar(ao * jitter));
         }
       }
     }
