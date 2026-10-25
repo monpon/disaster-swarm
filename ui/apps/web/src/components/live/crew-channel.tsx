@@ -1,8 +1,9 @@
 import { Button } from "@swarm/ui/components/button";
 import { cn } from "@swarm/ui/lib/utils";
-import { BellRing, ChevronDown, ChevronUp, Loader2, Mic, Volume2 } from "lucide-react";
+import { BellRing, BookOpen, ChevronDown, ChevronUp, Loader2, Mic, Volume2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { readManaNote, type ManaNote } from "@/lib/building";
 import { useConsole } from "@/lib/console";
 import { getDetection } from "@/lib/detection";
 import { alertFor, missionDocs, routesBrief } from "@/lib/mission-brief";
@@ -29,7 +30,14 @@ export function CrewChannel({ collapsed, onToggle }: { collapsed: boolean; onTog
       routes: s.live ? routesBrief(s.raw) : [],
     };
   }, []);
-  const docs = useCallback(() => (snapshot.current.live ? missionDocs(snapshot.current.raw) : []), []);
+  // Building research from Mana, done on the new-mission page: shown at the top of the log and searchable by the agent.
+  const [mana, setMana] = useState<ManaNote | null>(null);
+  useEffect(() => setMana(readManaNote()), []);
+  const docs = useCallback(() => {
+    const note = readManaNote();
+    const building = (note?.findings ?? []).map((f, i) => ({ id: `mana-${i}`, text: `Building at ${note!.address}, ${f.label}: ${f.text} (source: ${f.source}, via Mana)` }));
+    return [...building, ...(snapshot.current.live ? missionDocs(snapshot.current.raw) : [])];
+  }, []);
   const agent = useVoiceAgent(consoleState, docs);
 
   // Proactive voice: with alerts on, say new findings as they appear (people, blocked openings) if their class is set to
@@ -83,6 +91,22 @@ export function CrewChannel({ collapsed, onToggle }: { collapsed: boolean; onTog
       </div>
       {!collapsed && (
         <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 pt-0.5 pb-3">
+          {mana && (
+            <div className="flex gap-2.5">
+              <span className="w-11 shrink-0 pt-0.5 font-mono text-[11px] text-muted">Setup</span>
+              <div className="flex flex-1 flex-col gap-1 rounded-lg bg-white px-2.5 py-2 text-[13px] leading-[18px] shadow-[0_0_0_1px_var(--color-line)]">
+                <span className="flex items-center gap-1.5 text-xs font-semibold">
+                  <BookOpen className="size-3 text-orange" strokeWidth={2.5} />
+                  Building research from Mana · {mana.address}
+                </span>
+                {mana.findings.slice(0, 3).map((f) => (
+                  <span key={f.label} title={f.source}>
+                    <span className="font-semibold">{f.label}.</span> {f.text}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {c.messages.map((m) => (
             <div key={m.id} className="flex gap-2.5">
               <span className="w-11 shrink-0 pt-0.5 font-mono text-[11px] text-muted">{m.at}</span>

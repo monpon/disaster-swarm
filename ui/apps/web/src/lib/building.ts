@@ -65,3 +65,23 @@ export const elmStreet: BuildingContext = {
   ceiling: { label: "Regulatory ceiling", value: "400 ft AGL", trust: "record", source: "14 CFR 107.51. Airspace and TFRs may lower it." },
   parcel: "M 390 392 L 486 388 L 490 508 L 394 512 Z",
 };
+
+/** Building research from Mana for the chosen address, carried from mission setup into the live console. */
+export interface ManaNote {
+  address: string;
+  at: number;
+  findings: { label: string; text: string; source: string }[];
+  doc: { title: string };
+  logged: string | null;
+}
+
+export const manaNoteKey = "mayfly.manaResearch";
+
+export function readManaNote(): ManaNote | null {
+  try {
+    const raw = sessionStorage.getItem(manaNoteKey);
+    return raw ? (JSON.parse(raw) as ManaNote) : null;
+  } catch {
+    return null;
+  }
+}

@@ -1,13 +1,13 @@
 import { Button } from "@swarm/ui/components/button";
 import { cn } from "@swarm/ui/lib/utils";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { AlertCircle, ArrowRight, Check, ChevronRight, MapPin, Minus, Plus, Search, Truck } from "lucide-react";
+import { AlertCircle, ArrowRight, BookOpen, Check, ChevronRight, Loader2, MapPin, Minus, Plus, Search, Truck } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { AttributeRow, TrustLegend } from "@/components/building/trust";
 import { Mark } from "@/components/icons";
 import { Stage } from "@/components/map/stage";
-import { elmStreet } from "@/lib/building";
+import { elmStreet, manaNoteKey, type ManaNote } from "@/lib/building";
 import { addressResults, missionTypeKey, missionTypes, recentMissions } from "@/lib/mock";
 import { requireUser } from "@/lib/session";
 
@@ -166,7 +166,7 @@ function NewMissionPage() {
                   <path d="M14 1C6.8 1 1 6.8 1 14c0 9.5 13 21 13 21s13-11.5 13-21C27 6.8 21.2 1 14 1Z" fill="var(--color-orange)" stroke="#fff" strokeWidth={2} />
                   <circle cx={14} cy={14} r={5} fill="#fff" />
                 </svg>
-                <BuildingCard street={chosen.street} showZoning={layer === "Parcels"} />
+                <BuildingCard street={chosen.street} address={`${chosen.street}, ${chosen.city}`} missionType={type} showZoning={layer === "Parcels"} />
               </>
             )}
             <span
@@ -206,8 +206,22 @@ function NewMissionPage() {
   );
 }
 
-function BuildingCard({ street, showZoning }: { street: string; showZoning: boolean }) {
+function BuildingCard({ street, address, missionType, showZoning }: { street: string; address: string; missionType: string; showZoning: boolean }) {
   const b = elmStreet;
+  const [mana, setMana] = useState<{ state: "idle" | "loading" | "error"; note?: ManaNote; error?: string }>({ state: "idle" });
+  const research = async () => {
+    setMana({ state: "loading" });
+    try {
+      const r = await fetch("/api/mana", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address, missionType }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error ?? "Mana research failed.");
+      const note: ManaNote = { ...j, at: Date.now() };
+      sessionStorage.setItem(manaNoteKey, JSON.stringify(note));
+      setMana({ state: "idle", note });
+    } catch (e) {
+      setMana({ state: "error", error: e instanceof Error ? e.message : String(e) });
+    }
+  };
   return (
     <div className="absolute flex w-[290px] flex-col overflow-hidden rounded-[10px] bg-white shadow-[0_0_0_1px_var(--color-line),0_10px_28px_rgb(0_0_0/0.14)]" style={{ left: 510, top: 290 }}>
       <div className="flex flex-col gap-0.5 px-3.5 pt-3 pb-2.5">
@@ -232,6 +246,35 @@ function BuildingCard({ street, showZoning }: { street: string; showZoning: bool
           Crew picks the building if several match
         </p>
         <TrustLegend />
+      </div>
+      <div className="flex flex-col gap-2 border-t border-line-soft px-3.5 pt-2.5 pb-3 text-xs">
+        {mana.note ? (
+          <>
+            <span className="flex items-center gap-1.5 font-semibold">
+              <BookOpen className="size-3.5 text-orange" strokeWidth={2.5} />
+              From Mana: {mana.note.doc.title}
+            </span>
+            <ul className="flex max-h-[180px] flex-col gap-1.5 overflow-y-auto">
+              {mana.note.findings.map((f) => (
+                <li key={f.label} title={f.source}>
+                  <span className="font-semibold">{f.label}.</span> <span className="text-muted">{f.text}</span>
+                </li>
+              ))}
+            </ul>
+            <span className="text-faint">{mana.note.logged ? "Logged to the mission log and to Mayfly missions in Mana." : "Added to the mission log."}</span>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={research}
+            disabled={mana.state === "loading"}
+            className="btn-secondary flex h-8 items-center justify-center gap-1.5 rounded-md font-semibold disabled:opacity-60"
+          >
+            {mana.state === "loading" ? <Loader2 className="size-3.5 animate-spin" /> : <BookOpen className="size-3.5" />}
+            {mana.state === "loading" ? "Asking Mana…" : "Research with Mana"}
+          </button>
+        )}
+        {mana.state === "error" && <span className="text-hazard">{mana.error}</span>}
       </div>
     </div>
   );
