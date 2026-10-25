@@ -3,16 +3,19 @@ import { cn } from "@swarm/ui/lib/utils";
 import { CornerUpRight } from "lucide-react";
 import { useState } from "react";
 
-import { findings, liveDrones, vitals, type Finding } from "@/lib/mock";
+import { useConsole } from "@/lib/console";
+import { vitals as demoVitals } from "@/lib/mock";
+import { type LiveFinding as Finding } from "@/lib/swarm";
 
 import { FindingIcon } from "../icons";
+import { FeedCanvas } from "./feed-canvas";
 
 type Tab = "findings" | "drones" | "log";
 
-function Tabs({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void }) {
+function Tabs({ tab, onChange, counts }: { tab: Tab; onChange: (tab: Tab) => void; counts: { findings: number; drones: number } }) {
   const items: { id: Tab; label: string; count?: number }[] = [
-    { id: "findings", label: "Findings", count: findings.length + 1 },
-    { id: "drones", label: "Drones", count: liveDrones.length },
+    { id: "findings", label: "Findings", count: counts.findings },
+    { id: "drones", label: "Drones", count: counts.drones },
     { id: "log", label: "Log" },
   ];
   return (
@@ -38,7 +41,11 @@ function Tabs({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void }) {
 }
 
 function ExpandedPerson({ finding }: { finding: Finding }) {
+  const c = useConsole();
   const [reached, setReached] = useState(false);
+  const live = c.live;
+  const vitals = live ? { breathing: finding.vitals?.rr ?? 0, pulse: finding.vitals?.hr ?? 0, movement: finding.tier ? finding.tier.toLowerCase() : "assessing", seenAt: c.mission.elapsed } : demoVitals;
+  const frame = live && finding.drone != null ? c.raw.feeds[finding.drone] : undefined;
   return (
     <div className="flex flex-col gap-3.5 border-b border-[#f3d9cc] bg-[#fff7f3] px-4 pt-3.5 pb-4 shadow-[inset_3px_0_0_var(--color-person)]">
       <div className="flex items-start gap-3">
@@ -49,16 +56,25 @@ function ExpandedPerson({ finding }: { finding: Finding }) {
         </div>
         <span className="font-mono text-xs font-medium">{Math.round((finding.confidence ?? 0) * 100)}%</span>
       </div>
-      <div className="relative h-[132px] overflow-hidden rounded-lg bg-[#222]">
-        <img src="/assets/f2.png" alt="Snapshot of the person from D2" className="absolute top-[-200px] left-[-30px] h-[338px] w-[600px] max-w-none" />
-        <div className="absolute top-[30px] left-[38px] h-[78px] w-[272px] border-2 border-[#FF3B2E]" />
-        <span className="absolute right-2 bottom-2 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[11px] text-white">{vitals.seenAt}</span>
-      </div>
+      {live ? (
+        frame && (
+          <div className="relative h-[132px] overflow-hidden rounded-lg bg-[#222]">
+            <FeedCanvas drone={finding.drone!} className="size-full object-cover" />
+            <span className="absolute right-2 bottom-2 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[11px] text-white">live</span>
+          </div>
+        )
+      ) : (
+        <div className="relative h-[132px] overflow-hidden rounded-lg bg-[#222]">
+          <img src="/assets/f2.png" alt="Snapshot of the person from D2" className="absolute top-[-200px] left-[-30px] h-[338px] w-[600px] max-w-none" />
+          <div className="absolute top-[30px] left-[38px] h-[78px] w-[272px] border-2 border-[#FF3B2E]" />
+          <span className="absolute right-2 bottom-2 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[11px] text-white">{vitals.seenAt}</span>
+        </div>
+      )}
       <div className="flex gap-6">
         <Vital label="Breathing" value={vitals.breathing} unit="/min" />
         <Vital label="Pulse" value={vitals.pulse} unit="bpm" />
         <div className="flex flex-col gap-0.5">
-          <span className="text-xs text-muted">Movement</span>
+          <span className="text-xs text-muted">{live ? "Triage" : "Movement"}</span>
           <span className="pt-1 text-[15px] font-semibold">{vitals.movement}</span>
         </div>
       </div>
@@ -101,9 +117,10 @@ function FindingRow({ finding, onSelect }: { finding: Finding; onSelect: () => v
 }
 
 function DroneRows() {
+  const c = useConsole();
   return (
     <div className="flex flex-col">
-      {liveDrones.map((d) => (
+      {c.drones.map((d) => (
         <div key={d.id} className="flex h-12 items-center gap-3 border-b border-line-soft px-4">
           <span className={cn("size-2 rounded-full", d.status === "calibrate" ? "bg-hazard" : "bg-ok")} />
           <span className="w-8 font-mono text-[13px] font-semibold">{d.id}</span>
@@ -118,9 +135,11 @@ function DroneRows() {
 
 export function FindingsPanel({ selected, onSelect }: { selected: string | null; onSelect: (id: string | null) => void }) {
   const [tab, setTab] = useState<Tab>("findings");
+  const c = useConsole();
+  const findings = c.findings;
   return (
     <div className="flex h-full flex-col">
-      <Tabs tab={tab} onChange={setTab} />
+      <Tabs tab={tab} onChange={setTab} counts={{ findings: findings.length, drones: c.drones.length }} />
       <div className="min-h-0 flex-1 overflow-y-auto">
         {tab === "findings" &&
           findings.map((f) =>
@@ -131,7 +150,16 @@ export function FindingsPanel({ selected, onSelect }: { selected: string | null;
             ),
           )}
         {tab === "drones" && <DroneRows />}
-        {tab === "log" && <p className="p-4 text-[13px] text-muted">Mission log streams here once the edge server is connected.</p>}
+        {tab === "log" &&
+          (c.live ? (
+            <div className="flex flex-col gap-1.5 p-4">
+              {c.messages.map((m) => (
+                <p key={m.id} className="text-[13px]"><span className="mr-2 font-mono text-[11px] text-muted">{m.at}</span>{m.text}</p>
+              ))}
+            </div>
+          ) : (
+            <p className="p-4 text-[13px] text-muted">Mission log streams here once the edge server is connected.</p>
+          ))}
       </div>
     </div>
   );

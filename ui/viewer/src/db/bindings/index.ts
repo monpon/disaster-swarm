@@ -36,15 +36,18 @@ import {
 // Import all reducer arg schemas
 import AckCmdReducer from "./ack_cmd_reducer";
 import AddEventsReducer from "./add_events_reducer";
+import ClaimWriterReducer from "./claim_writer_reducer";
 import ClearAllReducer from "./clear_all_reducer";
 import DropKeysReducer from "./drop_keys_reducer";
 import PutReducer from "./put_reducer";
+import PutBlobsReducer from "./put_blobs_reducer";
 import PutManyReducer from "./put_many_reducer";
 import SubmitCmdReducer from "./submit_cmd_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
+import BulkRow from "./bulk_table";
 import CmdRow from "./cmd_table";
 import EntityRow from "./entity_table";
 import EventRow from "./event_table";
@@ -53,6 +56,17 @@ import EventRow from "./event_table";
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
+  bulk: __table({
+    name: 'bulk',
+    indexes: [
+      { accessor: 'key', name: 'bulk_key_idx_btree', algorithm: 'btree', columns: [
+        'key',
+      ] },
+    ],
+    constraints: [
+      { name: 'bulk_key_key', constraint: 'unique', columns: ['key'] },
+    ],
+  }, BulkRow),
   cmd: __table({
     name: 'cmd',
     indexes: [
@@ -92,9 +106,11 @@ const tablesSchema = __schema({
 const reducersSchema = __reducers(
   __reducerSchema("ack_cmd", AckCmdReducer),
   __reducerSchema("add_events", AddEventsReducer),
+  __reducerSchema("claim_writer", ClaimWriterReducer),
   __reducerSchema("clear_all", ClearAllReducer),
   __reducerSchema("drop_keys", DropKeysReducer),
   __reducerSchema("put", PutReducer),
+  __reducerSchema("put_blobs", PutBlobsReducer),
   __reducerSchema("put_many", PutManyReducer),
   __reducerSchema("submit_cmd", SubmitCmdReducer),
 );

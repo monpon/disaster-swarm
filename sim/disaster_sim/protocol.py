@@ -210,20 +210,43 @@ def state_message(sim: Simulation, stream: MapStream, since_event: int, extra: d
     return msg
 
 
-def feed_arrays(sim: Simulation, drone: int) -> dict | None:
+def feed_arrays(sim: Simulation, drone: int, depth: bool = True) -> dict | None:
     """The latest frame the master received from `drone` and the depth it estimated for it, as arrays."""
     f = sim.last_frames[drone] if 0 <= drone < len(sim.last_frames) else None
     est = sim.master.last_depth[drone] if 0 <= drone < len(sim.master.last_depth) else None
-    if f is None or est is None:
+    if f is None or (depth and est is None):
         return None
     h, w = sim.cfg.cam_h, sim.cfg.cam_w
-    est = (est if isinstance(est, np.ndarray) else est.cpu().numpy()).reshape(h, w)
     rgb = sim.core.rgb(f.slot) if (f.slot >= 0 and sim.core is not None) else f.rgb.cpu().numpy()
     rgb = np.asarray(rgb)
-    depth = np.where(est > 0, np.clip(255 - est / sim.cfg.depth_max * 255, 1, 255), 0)
+    if depth:
+        est = (est if isinstance(est, np.ndarray) else est.cpu().numpy()).reshape(h, w)
+        depth = np.where(est > 0, np.clip(255 - est / sim.cfg.depth_max * 255, 1, 255), 0)
+    else:
+        depth = None
     return {"t": round(float(f.t), 2), "age": round(float(sim.t - f.t), 2), "w": int(rgb.shape[1]), "h": int(rgb.shape[0]),
             "rgb": rgb, "depth": depth, "frames": [int(v) for v in sim.radio.frame_stats[drone]],
             "backlog": len(sim.backlog[drone]), "jpeg_kb": round(f.nbytes / 1000, 1)}
+
+
+def preview_frames(sim: Simulation, drones: list[int]) -> np.ndarray | None:
+    """Live camera views of `drones` rendered now from their true poses, (B, H, W, 3) uint8: what a viewer watching the
+    drone sees, at a rate of the viewer's choosing (the frames the master receives are only 4 a second). None when the
+    core has no room or is not the Rust one."""
+    core, f = sim.core, sim.fleet
+    ids = [d for d in drones if 0 <= d < f.n]
+    if core is None or not ids or core.free_slots() < len(ids) + 8:
+        return None
+    poss = np.stack([f.pos[i] for i in ids]).astype(np.float32)
+    rots = np.stack([f.rot[i] for i in ids]).astype(np.float32)
+    om = np.stack([f.omega[i] for i in ids]).astype(np.float32)
+    inside = sim.b.inside_building(poss.astype(np.float64)).astype(np.uint8)
+    slots = [int(s) for s in core.render(poss, rots, om, inside, int(np.random.randint(1 << 30)))]
+    try:
+        return np.asarray(core.rgbs(slots)).reshape(len(ids), sim.cfg.cam_h, sim.cfg.cam_w, 3)
+    finally:
+        for s in slots:
+            core.free_slot(s)
 
 
 def feed_message(sim: Simulation, drone: int) -> dict | None:

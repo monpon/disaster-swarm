@@ -14,13 +14,14 @@ export interface Stage {
   sun: THREE.DirectionalLight;
 }
 
-export function createStage(container: HTMLElement, background = "#0b0f17"): Stage {
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+export function createStage(container: HTMLElement, background = "#0b0f17", transparent = false): Stage {
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: transparent });
+  if (transparent) renderer.setClearColor(0x000000, 0);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(container.clientWidth, container.clientHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMapping = transparent ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
   container.appendChild(renderer.domElement);
 
   const labels = new CSS2DRenderer();
@@ -29,8 +30,10 @@ export function createStage(container: HTMLElement, background = "#0b0f17"): Sta
   container.appendChild(labels.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(background);
-  scene.fog = new THREE.Fog(background, 350, 900);
+  if (!transparent) {
+    scene.background = new THREE.Color(background);
+    scene.fog = new THREE.Fog(background, 350, 900);
+  }
 
   const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 3000);
   camera.position.set(-170, -210, 170);

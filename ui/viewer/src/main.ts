@@ -26,9 +26,16 @@ import {
 } from "./types";
 
 // Left: the real building with the drones flying. Right: the master's reconstruction.
+// `?embed=cloud`: just the master's point cloud on a transparent background, for the console to frame (it overlays the markers
+// itself, from the camera matrix this page posts to its parent).
+const embed = new URLSearchParams(location.search).get("embed") === "cloud";
+if (embed) {
+  document.body.classList.add("embed");
+  document.documentElement.style.background = "transparent";
+}
 const viewsEl = document.getElementById("views")!;
 const real = createStage(document.getElementById("view-real")!);
-const map = createStage(document.getElementById("view-map")!, "#06080d");
+const map = createStage(document.getElementById("view-map")!, "#06080d", embed);
 for (const st of [real, map]) st.renderer.localClippingEnabled = true;
 map.renderer.shadowMap.enabled = false;
 
@@ -130,6 +137,7 @@ function cutHeight(v: ViewSettings): number {
 }
 
 function applyView(v: ViewSettings): void {
+  if (embed) v = { ...v, view: "map", demoClean: false, mapRender: "points", smoothed: true, floor: "all", pointSize: 0.35 };
   viewsEl.className = `mode-${v.view}`;
   document.querySelectorAll<HTMLButtonElement>("#view-switch button").forEach((b) =>
     b.classList.toggle("on", b.dataset.view === v.view),
@@ -221,6 +229,7 @@ async function onWorld(b: BuildingInfo, cfg: SimConfig): Promise<void> {
     s.camera = cam;
   }
   mapView.build(b, cfg);
+  if (embed) mapView.cloud?.recolor(grey);
   await realView.build(b);
   if (token !== worldToken) return;
   if (realView.vox) mapView.setTrueModel(b, realView.vox);
@@ -262,8 +271,19 @@ function onMessage(msg: ServerMessage): void {
       void onWorld(msg.building, msg.config).then(() => {
         if (firstWorld) {
           firstWorld = false;
-          rig.overview(true);
-          syncCamera(real, map);
+          if (embed) {
+            // a near-isometric view of the whole building
+            const [x0, y0, x1, y1] = building!.bbox;
+            const size = Math.max(x1 - x0, y1 - y0);
+            map.controls.target.set((x0 + x1) / 2, (y0 + y1) / 2, 2);
+            map.camera.fov = 28;
+            map.camera.updateProjectionMatrix();
+            map.camera.position.set((x0 + x1) / 2 - 0.62 * size * 1.9, (y0 + y1) / 2 - 0.78 * size * 1.9, size * 1.45);
+            active = map;
+          } else {
+            rig.overview(true);
+            syncCamera(real, map);
+          }
         }
       });
       break;
@@ -313,6 +333,29 @@ window.addEventListener("keydown", (e) => {
 
 const visible = (st: Stage) => st.renderer.domElement.parentElement!.clientWidth > 0;
 
+/** Grey point colours: the console draws the cloud as dark grey dots on its light map. */
+function grey(_vox: number, r: number, g: number, b: number, out: Uint8Array): void {
+  const l = (0.3 * r + 0.59 * g + 0.11 * b) / 255;
+  out[0] = out[1] = out[2] = Math.round(70 + 90 * l);
+}
+
+let lastVp = "";
+/** Only the cloud shows; tell the parent page how the camera projects so it can place its markers. */
+function embedFrame(): void {
+  for (const o of [swarmMap.group, commsMap.group]) o.visible = false;
+  mapView.group.children.forEach((o) => {
+    if (o !== mapView.cloud?.points) o.visible = false;
+  });
+  const cam = map.camera;
+  cam.updateMatrixWorld();
+  const vp = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).toArray();
+  const el = map.renderer.domElement;
+  const key = `${vp.join(",")}|${el.clientWidth}x${el.clientHeight}`;
+  if (key === lastVp) return;
+  lastVp = key;
+  parent.postMessage({ type: "swarm-cam", vp, w: el.clientWidth, h: el.clientHeight }, "*");
+}
+
 const clock = new THREE.Clock();
 function frame(): void {
   const dt = Math.min(clock.getDelta(), 0.1);
@@ -335,6 +378,7 @@ function frame(): void {
   mapView.setTargets(targets, cut);
   mapView.setCandidates(candidates, t, cut);
   mapView.update();
+  if (embed) embedFrame();
   // Freshness colors age continuously; repaint a few times a second.
   if (v.mapColor === "freshness" && performance.now() - lastRecolor > 500) {
     lastRecolor = performance.now();

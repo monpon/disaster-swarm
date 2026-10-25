@@ -95,7 +95,7 @@ class SimConfig:
     # (so every drone has a perimeter leg from the first second). False: nothing, and the swarm
     # scouts the site to find it first.
     known_outline: bool = True
-    detector: bool = False  # run the person detector (object_det/, for real-world frames) instead of the sim's person sensor
+    detector: bool = True  # find people with the YOLO detector (object_det/) on the camera frames; False: the sim's person-mask sensor
     plan_assist: bool = False  # the operator also gives the building plan's openings: doors, docks, windows, hatch (demo)
     scout_alt: float = 6.0
     scout_spacing: float = 16.0

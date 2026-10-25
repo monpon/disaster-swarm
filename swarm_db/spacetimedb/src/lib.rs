@@ -14,6 +14,21 @@ pub struct Entity {
     pub data: Vec<u8>,
 }
 
+/// The heavy rows (mesh chunks, voxel / point / scan-freshness blocks, camera feeds): the same shape as `entity`, in their own table
+/// so a client that only wants the entities, or one drone's feed, can subscribe to just those.
+#[spacetimedb::table(accessor = bulk, public)]
+pub struct Bulk {
+    #[primary_key]
+    pub key: String,
+    pub ver: u64,
+    pub text: String,
+    pub data: Vec<u8>,
+}
+
+fn is_bulk(key: &str) -> bool {
+    key.starts_with("vox/") || key.starts_with("pt/") || key.starts_with("seen/") || key.starts_with("mesh/") || key.starts_with("feed/")
+}
+
 /// Mission log lines, append-only.
 #[spacetimedb::table(accessor = event, public)]
 pub struct Event {
@@ -59,8 +74,13 @@ pub fn claim_writer(ctx: &ReducerContext) {
 }
 
 fn upsert(ctx: &ReducerContext, key: String, ver: u64, text: String, data: Vec<u8>) {
-    ctx.db.entity().key().delete(&key);
-    ctx.db.entity().insert(Entity { key, ver, text, data });
+    if is_bulk(&key) {
+        ctx.db.bulk().key().delete(&key);
+        ctx.db.bulk().insert(Bulk { key, ver, text, data });
+    } else {
+        ctx.db.entity().key().delete(&key);
+        ctx.db.entity().insert(Entity { key, ver, text, data });
+    }
 }
 
 /// One row, with an optional binary payload.
@@ -124,6 +144,7 @@ pub fn drop_keys(ctx: &ReducerContext, keys: String) {
     if let Ok(list) = serde_json::from_str::<Vec<String>>(&keys) {
         for k in list {
             ctx.db.entity().key().delete(&k);
+            ctx.db.bulk().key().delete(&k);
         }
     }
 }
@@ -165,6 +186,10 @@ pub fn clear_all(ctx: &ReducerContext) {
     let keys: Vec<String> = ctx.db.entity().iter().map(|r| r.key).collect();
     for k in keys {
         ctx.db.entity().key().delete(&k);
+    }
+    let bk: Vec<String> = ctx.db.bulk().iter().map(|r| r.key).collect();
+    for k in bk {
+        ctx.db.bulk().key().delete(&k);
     }
     let evs: Vec<u64> = ctx.db.event().iter().map(|r| r.seq).collect();
     for s in evs {

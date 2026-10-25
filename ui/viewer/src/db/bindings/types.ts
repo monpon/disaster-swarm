@@ -10,6 +10,14 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const Bulk = __t.object("Bulk", {
+  key: __t.string(),
+  ver: __t.u64(),
+  text: __t.string(),
+  data: __t.byteArray(),
+});
+export type Bulk = __Infer<typeof Bulk>;
+
 export const Cmd = __t.object("Cmd", {
   seq: __t.u64(),
   name: __t.string(),
@@ -32,4 +40,10 @@ export const Event = __t.object("Event", {
   text: __t.string(),
 });
 export type Event = __Infer<typeof Event>;
+
+export const Writer = __t.object("Writer", {
+  id: __t.u8(),
+  who: __t.identity(),
+});
+export type Writer = __Infer<typeof Writer>;
 

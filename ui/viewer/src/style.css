@@ -656,3 +656,8 @@ kbd {
 #plan-tabs button { font: 600 11px var(--mono); padding: 5px 12px; border-radius: 6px; cursor: pointer; color: #9aa3b5;
   background: rgba(20, 26, 38, 0.85); border: 1px solid rgba(255, 255, 255, 0.12); }
 #plan-tabs button.on { color: #0b0f17; background: #5ec8ff; border-color: #5ec8ff; }
+
+/* ---------- ?embed=cloud: only the point cloud, on a transparent page ---------- */
+body.embed { background: transparent; }
+body.embed #hud, body.embed .view-tag, body.embed .legend, body.embed #demo-badge, body.embed #cut-label,
+body.embed .lil-gui, body.embed #feed-panel, body.embed #left, body.embed #right, body.embed .label-layer { display: none !important; }

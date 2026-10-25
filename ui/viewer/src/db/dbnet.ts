@@ -38,18 +38,20 @@ export class DbNet {
       .onConnect((c) => {
         this.conn = c;
         this.onStatus(true);
-        c.db.entity.onInsert((_ctx, r) => this.set(r.key, r.text, r.data));
-        c.db.entity.onUpdate((_ctx, _o, r) => this.set(r.key, r.text, r.data));
-        c.db.entity.onDelete((_ctx, r) => {
-          this.rows.delete(r.key);
-          this.dirty.add(r.key);
-          this.schedule();
-        });
+        for (const t of [c.db.entity, c.db.bulk]) {   // the light and the heavy rows share one key space
+          t.onInsert((_ctx, r) => this.set(r.key, r.text, r.data));
+          t.onUpdate((_ctx, _o, r) => this.set(r.key, r.text, r.data));
+          t.onDelete((_ctx, r) => {
+            this.rows.delete(r.key);
+            this.dirty.add(r.key);
+            this.schedule();
+          });
+        }
         c.db.event.onInsert((_ctx, r) => {
           this.events.set(Number(r.seq), { t: r.t, level: r.level as SimEvent["level"], text: r.text });
           this.schedule();
         });
-        c.subscriptionBuilder().subscribe([tables.entity, tables.event]);
+        c.subscriptionBuilder().subscribe([tables.entity, tables.bulk, tables.event]);
         this.sendSelect();
         this.onOpen?.();
       })
@@ -68,7 +70,7 @@ export class DbNet {
   private set(key: string, text: string, data: Uint8Array): void {
     this.rows.set(key, { text, data });
     if (/^(vox|pt|seen|mesh)\//.test(key)) this.mapKeys.add(key);
-    else if (key.startsWith("feed/")) this.feedKeys.add(key);
+    else if (/^feed\/\d+$/.test(key)) this.feedKeys.add(key);   // (feed/jpg<N> rows are the console's)
     else this.dirty.add(key);
     this.schedule();
   }

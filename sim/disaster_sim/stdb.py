@@ -19,7 +19,7 @@ import urllib.parse
 import numpy as np
 
 from .floorplan import floorplan
-from .protocol import MAX_TARGETS, feed_arrays, world_message
+from .protocol import MAX_TARGETS, feed_arrays, preview_frames, world_message
 
 PERIOD_S = 0.2  # entities are published at 5 Hz
 CMD_PERIOD_S = 0.25
@@ -27,6 +27,9 @@ PLAN_PERIOD_S = 1.0
 HISTORY_PERIOD_S = 5.0
 FEED_PERIOD_S = 0.25
 SELECT_TTL_S = 12.0
+JPEG_PERIOD_S = 1 / 15   # the console's camera feeds: live views rendered this often
+JPEG_MAX_DRONES = 6
+JPEG_QUALITY = 80
 VBLOCK = 4096   # voxels per vox/<b> and seen/<b> row
 PBLOCK = 64   # points per pt/<b> row (small: point refinements are scattered, and a block is rewritten whole)
 MAP_BUDGET = 1_200_000   # bytes of map blocks written per round (oldest first, so nothing starves)
@@ -94,12 +97,16 @@ class StdbPublisher:
         self._claimed = False
         self.sel: dict[str, tuple] = {}   # viewer id -> (selected drone, when): whose camera feed to publish
         self._t_feed = 0.0
+        self.jpeg_sent: dict[int, float] = {}   # drone -> t of the last frame sent as JPEG
+        self.jpeg_client = StdbClient(url, db)
         self.m = None   # the map mirror (see _reset_map)
         self.last_ms = 0.0
         self.last_error = ""
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="stdb", daemon=True)
         self._thread.start()
+        self._jthread = threading.Thread(target=self._jpeg_run, name="stdb-jpeg", daemon=True)
+        self._jthread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -198,7 +205,8 @@ class StdbPublisher:
             try:
                 if name == "select":   # a viewer picked a drone: publish its camera feed while it keeps looking
                     a = json.loads(args)
-                    self.sel[str(a.get("client", ""))] = (a.get("drone"), time.time())
+                    ds = a.get("drones") if a.get("drones") is not None else [a.get("drone")]
+                    self.sel[str(a.get("client", ""))] = ([d for d in ds if d is not None], time.time(), a.get("drones") is not None)
                     self.client.call("ack_cmd", seq)
                     continue
                 msg = {"type": "control", "cmd": name, **(json.loads(args) if args else {})}
@@ -299,13 +307,49 @@ class StdbPublisher:
         self._t_feed = now
         self.sel = {k: v for k, v in self.sel.items() if now - v[1] < SELECT_TTL_S}
         out = []
-        for d in sorted({v[0] for v in self.sel.values() if v[0] is not None}):
+        for d in sorted({d for v in self.sel.values() if not v[2] for d in v[0]}):
             a = feed_arrays(sim, int(d))
             if a is None:
                 continue
             meta = _dumps({k: a[k] for k in ("t", "age", "w", "h", "frames", "backlog", "jpeg_kb")})
             out.append((f"feed/{int(d)}", 0, meta, np.ascontiguousarray(a["rgb"], "u1").tobytes() + np.ascontiguousarray(a["depth"], "u1").tobytes()))
         return out
+
+    def _jpeg_run(self) -> None:
+        """Camera feeds for the console: JPEG frames (no depth), on their own thread and connection so a heavy map round never
+        delays them, written as soon as the drone's frame changes."""
+        import io
+        from PIL import Image
+        while not self._stop.is_set():
+            t0 = time.perf_counter()
+            try:
+                now = time.time()
+                want = sorted({d for v in list(self.sel.values()) if v[2] and now - v[1] < SELECT_TTL_S for d in v[0]})
+                batch = []
+                want = want[:JPEG_MAX_DRONES]
+                with self.server.lock:
+                    sim = self.server.sim
+                    frames = preview_frames(sim, want) if want else None
+                    t_sim = round(float(sim.t), 2)
+                    if frames is None:   # no render room (or not the Rust core): fall back to what the master last received
+                        old = {d: feed_arrays(sim, int(d), depth=False) for d in want}
+                        frames = None
+                if frames is not None:
+                    pairs = [(d, frames[j], t_sim, 0.0) for j, d in enumerate(want)]
+                else:
+                    pairs = [(d, a["rgb"], a["t"], a["age"]) for d, a in old.items() if a is not None and self.jpeg_sent.get(int(d)) != a["t"]]
+                for d, rgb, t, age in pairs:
+                    self.jpeg_sent[int(d)] = t
+                    buf = io.BytesIO()
+                    Image.fromarray(np.ascontiguousarray(rgb, "u1")).save(buf, "JPEG", quality=JPEG_QUALITY)
+                    meta = _dumps({"t": t, "age": age, "w": int(rgb.shape[1]), "h": int(rgb.shape[0])})
+                    batch.append([f"feed/jpg{int(d)}", 0, meta, buf.getvalue().hex()])
+                if batch:
+                    self.jpeg_client.call("put_blobs", _dumps(batch))
+            except Exception:
+                traceback.print_exc()
+                time.sleep(1.0)
+            time.sleep(max(0.0, JPEG_PERIOD_S - (time.perf_counter() - t0)))
 
     def _send_blobs(self, mesh: list, feeds: list) -> None:
         """Write mesh chunks, feeds and dirty map blocks (oldest first, within a byte budget) in a few big calls."""
