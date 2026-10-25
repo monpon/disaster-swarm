@@ -14,7 +14,8 @@ CHUNK = 0x5B8
 
 
 class FrameStats:
-    def __init__(self) -> None:
+    def __init__(self, on_frame=None) -> None:
+        self.on_frame = on_frame  # callback(jpeg bytes) for each intact frame
         self.ok = self.bad_count = self.bad_jpeg = self.abandoned = self.ignored = 0
         self.chunks = 0
         self.first_ts = self.last_ts = None
@@ -52,6 +53,8 @@ class FrameStats:
                     data = bytes(self._buf[: (self._n - 1) * CHUNK + eoi + 2])
                     if data.startswith(SOI) and data.endswith(EOI):
                         self.ok += 1
+                        if self.on_frame:
+                            self.on_frame(data)
                     else:
                         self.bad_jpeg += 1
             self._reset()
