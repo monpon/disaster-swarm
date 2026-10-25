@@ -7,23 +7,18 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { ArrowUp, ChevronDown } from "lucide-react";
 import { useState } from "react";
 
+import { AttributeRow, TrustLegend } from "@/components/building/trust";
 import { Row, Section, Select } from "@/components/form";
 import { PlanMap } from "@/components/setup/plan-map";
 import { ConsoleBody } from "@/components/shell/console-body";
 import { TopBar } from "@/components/shell/top-bar";
+import { elmStreet as b } from "@/lib/building";
 import { fleet, mission } from "@/lib/mock";
 
 export const Route = createFileRoute("/_app/setup")({
   head: () => ({ meta: [{ title: `Mission setup: ${mission.address}` }] }),
   component: SetupPage,
 });
-
-const facts: [string, string, boolean?][] = [
-  ["Floors", "2"],
-  ["Floor area", "152 m²"],
-  ["Construction", "Wood frame, 1962"],
-  ["Utilities", "Natural gas", true],
-];
 
 function SetupPage() {
   const [building, setBuilding] = useState<"house" | "office" | "apartment">("house");
@@ -61,14 +56,16 @@ function SetupPage() {
                   { value: "apartment", label: "Apartment" },
                 ]}
               />
-              <dl className="flex flex-col">
-                {facts.map(([k, v, warn], i) => (
-                  <div key={k} className={cn("flex h-[30px] items-center", i < facts.length - 1 && "border-b border-line-soft")}>
-                    <dt className="flex-1 text-[13px] text-muted">{k}</dt>
-                    <dd className={cn("text-[13px]", warn && "font-medium text-orange-edge", k === "Floor area" || k === "Floors" ? "font-mono" : "")}>{v}</dd>
-                  </div>
+              <dl className="flex flex-col divide-y divide-line-soft">
+                {[b.floors, b.footprint, b.height, b.lot, b.zoning, b.year, b.construction, b.ceiling].map((a) => (
+                  <AttributeRow key={a.label} a={a} />
                 ))}
+                <div className="flex min-h-[30px] items-center py-1">
+                  <dt className="flex-1 text-[13px] text-muted">Utilities</dt>
+                  <dd className="text-[13px] font-medium text-orange-edge">Natural gas</dd>
+                </div>
               </dl>
+              <TrustLegend />
             </Section>
             <Section title="Drones" aside={<span className="text-xs text-muted">{count} of 4 ready</span>}>
               <div className="flex flex-col overflow-hidden rounded-lg shadow-[0_0_0_1px_var(--color-line)]">
