@@ -1,0 +1,27 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+.output
+.nitro
+.tanstack
+*.tsbuildinfo
+
+# Generated files
+apps/web/src/routeTree.gen.ts
+
+# Environment variables
+.env
+.env*.local
+
+# Turbo
+.turbo
+
+# Misc
+.DS_Store
+*.log
+__pycache__
+
+# Vercel
+.vercel
