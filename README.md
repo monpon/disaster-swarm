@@ -150,4 +150,4 @@ Click a drone (or a fleet row) to follow it, `Esc` stops following, `O` overview
 
 ## Team
 
-Built at CalHacks 13 by Monesh Ponduri.
+Built at CalHacks 13.
