@@ -1,10 +1,36 @@
 # Mayfly
-Calhacks 13 submission
+CalHacks 13 submission
 
-Mayfly: search-and-rescue drone swarm simulator. A single central master computer orchestrates
-every drone over a lossy, delayed radio link. The browser viewer shows two synchronized
-3D views side by side: the real world with drones flying (left) and the map the master
-has fused from drone uplinks, built live (right).
+**Live site: https://disaster-swarm.vercel.app/** (the web console; it shows demo data unless it is pointed at a running simulator, see below)
+
+Mayfly is a search-and-rescue drone swarm simulator, plus the tooling to connect it to real hardware. A single central master
+computer orchestrates every drone over a lossy, delayed radio link. The drones fly into an unknown collapsed building, build a
+3D map of it together, find people with a YOLO detector, and rank them by urgency. Everything is simulated except the hardware
+section at the end.
+
+- **Simulator:** Python plus a Rust/CUDA core (`gpucore`, built with NVRTC and PyO3) that renders every drone camera and fuses
+  depth into a TSDF map. Dual contouring turns it into flat walls and rectangular openings. Runs on a GPU machine (an ASUS GX10).
+- **People and triage:** jointed human figures, detected by YOLO (`object_det/`). Each survivor gets a *simulated* Presage-style
+  vitals reading and an urgency tier. The real Presage SDK was tested only on rendered clips with an injected pulse (`vitals/`).
+- **Live state in SpacetimeDB:** the sim publishes drones, survivors, the floor plan, the 3D point cloud and 15 fps camera feeds
+  into one database; the viewer and the web console only subscribe, so any number of browsers see the same mission.
+- **Web console** (`ui/apps/web`, TanStack Start): mission setup, a live view with the 3D cloud and floor plans, a scrollable feed
+  per drone with scanning highlights, and findings with vitals.
+- **Real hardware** (`drone_control/`): an ESP32-S3 relay forwards an E58 drone's UDP video and IMU data; a live page shows video
+  and a tracked path; a flight handler with failsafes and a read-only database publisher sit on top. The flight controller has been
+  tested against a fake drone and has never flown the real one.
+
+Built with [SpacetimeDB](https://spacetimedb.com) and [Presage](https://presagetech.com).
+
+## The web console
+
+The console is a TanStack Start app (`ui/apps/web`). The hosted copy at https://disaster-swarm.vercel.app/ runs on its demo
+data. It reads live data from a SpacetimeDB at `ws://<page host>:3000` (override with `?stdb=ws://host:3000`), so for a live
+mission serve it next to the sim (`scripts/console-up.sh`) or open it locally with `?stdb=` pointing at the sim's machine:
+
+```bash
+cd ui && bun install && cd apps/web && npx vite dev     # http://localhost:3001/live?stdb=ws://<sim host>:3000
+```
 
 ## Run
 
