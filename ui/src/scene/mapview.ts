@@ -332,7 +332,7 @@ export class MapView {
       }
       m.position.set(...c.pos);
       const mat = m.material as THREE.MeshBasicMaterial;
-      mat.color.set(c.confirmed ? "#3ddc97" : c.dismissed ? "#5a6273" : "#ffb020");
+      mat.color.set(c.confirmed ? (c.tier === "IMMEDIATE" ? "#ff4d4f" : c.tier === "URGENT" ? "#ffb020" : c.tier === "DELAYED" ? "#3ddc97" : "#5ec8ff") : c.dismissed ? "#5a6273" : "#ffb020");
       m.scale.setScalar(c.confirmed ? 1.2 : 0.8 + 0.3 * Math.sin(t * 5 + c.id));
       m.visible = c.pos[2] < cut;
     }

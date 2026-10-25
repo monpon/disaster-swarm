@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import materials as M
+from .humans import human
+from .presage import random_health
 from .config import SimConfig
 
 DOOR_W, DOOR_H = 3, 3
@@ -58,9 +60,16 @@ class Survivor:
     x: int
     y: int
     z: int
+    pose: str = "standing"
+    yaw: float = 0.0
+    prims: np.ndarray | None = None  # the person's capsules (n, 10), see humans.py
+    health: dict | None = None  # hidden condition: what a vitals sensor would pick up (never sent to the master)
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "x": self.x, "y": self.y, "z": self.z}
+        d = {"id": self.id, "x": self.x, "y": self.y, "z": self.z, "pose": self.pose}
+        if self.prims is not None:
+            d["prims"] = np.round(self.prims, 3).tolist()
+        return d
 
 
 @dataclass
@@ -419,5 +428,8 @@ def _survivors(rng, b: Building, keepout):
             continue
         if any(abs(s.x - x) + abs(s.y - y) + abs(s.z - z) < 6 for s in b.survivors):
             continue
-        v[x, y, z] = M.SURVIVOR
-        b.survivors.append(Survivor(len(b.survivors), x, y, z))
+        # a person, not a block: standing, sitting or lying, anywhere in the cell, facing any way
+        pose = ("standing", "sitting", "lying")[int(rng.integers(3))]
+        yaw = float(rng.uniform(-np.pi, np.pi))
+        px, py = x + 0.5 + float(rng.uniform(-0.25, 0.25)), y + 0.5 + float(rng.uniform(-0.25, 0.25))
+        b.survivors.append(Survivor(len(b.survivors), x, y, z, pose, yaw, human(px, py, float(z), pose, yaw, rng), random_health(rng)))

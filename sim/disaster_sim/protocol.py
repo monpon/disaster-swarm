@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from . import materials as M
+from .floorplan import floorplan
 from .config import PRESETS
 from .gpu import DEV
 from .sim import Simulation
@@ -179,14 +180,14 @@ def make_stream(sim: Simulation) -> MapStream:
 
 
 def state_message(sim: Simulation, stream: MapStream, since_event: int, extra: dict,
-                  with_seen: bool, full: bool = False) -> dict:
+                  with_seen: bool, full: bool = False, with_map: bool = True) -> dict:
     master = sim.master
     targets = master.targets[:MAX_TARGETS]
     msg = {
         "type": "snapshot" if full else "state",
         "drones": sim.drone_states(),
         "metrics": {**sim.metrics(), **extra},
-        "map": stream.deltas(full),
+        "map": stream.deltas(full) if with_map else {"n": 0, "nu": 0, "ptotal": int(sim.master.map.npts), "surf": []},
         "entries": [e.to_dict() for e in master.entries],
         "candidates": [c.to_dict() for c in master.candidates],
         "found": sim.found_survivor_ids(),
@@ -196,7 +197,12 @@ def state_message(sim: Simulation, stream: MapStream, since_event: int, extra: d
         "events": master.events[since_event:],
         "history": sim.history[-1] if sim.history else None,
     }
-    if with_seen or full:
+    if full or sim.t - getattr(stream, "_plan_t", -1e9) >= 1.0 or sim.t < getattr(stream, "_plan_t", 0.0):
+        stream._plan_t = sim.t   # the floor plan: a small raster per floor, about once a second
+        plan = floorplan(sim)
+        if plan is not None:
+            msg["plan"] = plan
+    if (with_seen or full) and with_map:
         msg["seen"] = stream.seen(full)
     if full:
         step = max(1, len(sim.history) // 600)
@@ -204,28 +210,26 @@ def state_message(sim: Simulation, stream: MapStream, since_event: int, extra: d
     return msg
 
 
-def feed_message(sim: Simulation, drone: int) -> dict | None:
-    """The latest JPEG frame the master received from `drone`, and the depth its monocular
-    depth network estimated for it (what the master actually works from)."""
+def feed_arrays(sim: Simulation, drone: int) -> dict | None:
+    """The latest frame the master received from `drone` and the depth it estimated for it, as arrays."""
     f = sim.last_frames[drone] if 0 <= drone < len(sim.last_frames) else None
     est = sim.master.last_depth[drone] if 0 <= drone < len(sim.master.last_depth) else None
     if f is None or est is None:
-        return {"type": "feed", "drone": drone, "t": None}
+        return None
     h, w = sim.cfg.cam_h, sim.cfg.cam_w
     est = (est if isinstance(est, np.ndarray) else est.cpu().numpy()).reshape(h, w)
     rgb = sim.core.rgb(f.slot) if (f.slot >= 0 and sim.core is not None) else f.rgb.cpu().numpy()
     rgb = np.asarray(rgb)
     depth = np.where(est > 0, np.clip(255 - est / sim.cfg.depth_max * 255, 1, 255), 0)
-    return {
-        "type": "feed",
-        "drone": drone,
-        "t": round(float(f.t), 2),
-        "age": round(float(sim.t - f.t), 2),
-        "w": int(rgb.shape[1]),
-        "h": int(rgb.shape[0]),
-        "rgb": b64(rgb, "u1"),
-        "depth": b64(depth, "u1"),
-        "frames": [int(v) for v in sim.radio.frame_stats[drone]],
-        "backlog": len(sim.backlog[drone]),
-        "jpeg_kb": round(f.nbytes / 1000, 1),
-    }
+    return {"t": round(float(f.t), 2), "age": round(float(sim.t - f.t), 2), "w": int(rgb.shape[1]), "h": int(rgb.shape[0]),
+            "rgb": rgb, "depth": depth, "frames": [int(v) for v in sim.radio.frame_stats[drone]],
+            "backlog": len(sim.backlog[drone]), "jpeg_kb": round(f.nbytes / 1000, 1)}
+
+
+def feed_message(sim: Simulation, drone: int) -> dict | None:
+    """The latest JPEG frame the master received from `drone`, and the depth its monocular
+    depth network estimated for it (what the master actually works from)."""
+    a = feed_arrays(sim, drone)
+    if a is None:
+        return {"type": "feed", "drone": drone, "t": None}
+    return {"type": "feed", "drone": drone, **{**a, "rgb": b64(a["rgb"], "u1"), "depth": b64(a["depth"], "u1")}}

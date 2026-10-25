@@ -77,7 +77,7 @@ extern "C" __global__ void k_carve(
 extern "C" __global__ void k_hit(
     MapDims d, int B, const float* __restrict__ poss, const float* __restrict__ rots, const float* __restrict__ est,
     const unsigned int* __restrict__ slots, const unsigned char* __restrict__ frgb, const float* __restrict__ tcap,
-    const float* __restrict__ rays, float q_near, float q_far, float q_thresh,
+    const float* __restrict__ rays, float q_near, float q_far, float q_thresh, const unsigned char* __restrict__ fpers,
     int* hstamp, int* delta, int* hitfr, float* csum, int* cnt, float* qb, float* seenb, int* sidebits, float* tmaxb,
     unsigned int frame_id0, float* surv, int* surv_n, int surv_cap)
 {
@@ -109,7 +109,7 @@ extern "C" __global__ void k_hit(
         atomicOr(&sidebits[v], 1 << side);
         atomic_max_f(&tmaxb[v], t);
     }
-    if (r > 150.0f && g < 0.33f * r && bl < 0.45f * r) {   // a person's heat signature, by colour ratio
+    if (fpers[(long long)slots[b] * d.N + n]) {   // the person sensor (thermal stand-in) flags this pixel
         int k = atomicAdd(surv_n, 1);
         if (k < surv_cap) { float* o = surv + k * 6; o[0] = (float)b; o[1] = hx; o[2] = hy; o[3] = hz; o[4] = depth; o[5] = 0.0f; }
     }

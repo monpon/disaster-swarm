@@ -18,6 +18,7 @@ Mission phases:
 from __future__ import annotations
 
 import dataclasses
+import os
 import queue
 import threading
 import time
@@ -32,6 +33,8 @@ from .align import Alignment, align_batch
 from .comms import M_HOLD, M_MIN, LinkModel, plan_chain
 from .gpu import DEV
 from .entry import opening_cue, ray_angles, servo_sticks
+from .detector import PERSON, PersonDetector
+from .presage import triage
 from .opening import DRONE_SIZE, fit_opening, plane_scale
 from .estimation import SimulatedDepthNet, SimulatedVIO
 from .packets import FramePacket, ImuPacket, StickCommand
@@ -55,10 +58,11 @@ LOOK_TIME = 1.5
 TILE = 4
 RELAY_TARGET_BPS = 2.0e6
 SURVEY_STANDOFF = 8.0
-ASSOC_RADIUS = 2.0
+ASSOC_RADIUS = 3.0  # survivors are at least 6 m apart; sightings of one person (different drones, depth error) land within this
 CONFIRM_DETECTIONS = 3
 CONFIRM_RANGE = 6.0
 INVESTIGATE_TIMEOUT = 40.0
+VITALS_TIMEOUT = 45.0  # a drone holds this long in front of a survivor for a vitals reading before giving up
 MAX_PLANS_PER_TICK = 4
 OUTDOOR_MARGIN = 3
 STAGE_DIST = 4.0  # m in front of an opening where the servo starts
@@ -201,10 +205,19 @@ class Candidate:
     assigned: int | None = None
     assigned_t: float = 0.0
     attempts: int = 0
+    vitals: dict | None = None  # the (simulated) Presage reading: hr, rr, confidence
+    urgency: int = -1  # 0-100 from the vitals; -1 = not assessed yet
+    tier: str = ""  # IMMEDIATE / URGENT / DELAYED
+    vitals_tries: int = 0
+    vitals_t0: float | None = None
+    view_fails: int = 0  # times no spot to look at them from was found
+    retry_t: float = 0.0
+    t_assessed: float = 0.0
 
     def to_dict(self) -> dict:
         return {"id": self.id, "pos": [round(float(v), 2) for v in self.pos], "n": self.n_det,
-                "confirmed": self.confirmed, "dismissed": self.dismissed, "drone": self.assigned}
+                "confirmed": self.confirmed, "dismissed": self.dismissed, "drone": self.assigned,
+                "vitals": self.vitals, "urgency": self.urgency, "tier": self.tier, "t_assessed": round(self.t_assessed, 1)}
 
 
 class MasterController:
@@ -215,7 +228,7 @@ class MasterController:
         # Plan-assisted: the building plan (its walls, floors and doors) is given, so routes are planned on it and the map
         # only has to be looked at, not discovered. Registering to the plan also keeps the pose estimate from drifting far.
         self.plan_air = None if plan_vox is None else (np.asarray(plan_vox) == 0)
-        self.max_slots = MAX_SLOTS if plan_vox is None else 12  # relay posts at once: the interior needs a longer backbone
+        self.max_slots = MAX_SLOTS if plan_vox is None else 5  # relay posts at once (the known building keeps the backbone short)
         self.plan_solid = None if plan_vox is None else ~self.plan_air
         self.map = RustMap(core, shape, cfg) if core is not None else VoxelMap(shape, cfg)
         self.shape = tuple(shape)
@@ -230,6 +243,9 @@ class MasterController:
         self.scout_attempts = 0
         self.entries: list[Entry] = []
         self._mesh_t = -1.0
+        self.detector = PersonDetector() if (core is not None and getattr(cfg, "detector", False)) else None
+        self._det_t: dict[int, float] = {}
+        self._dbg_n = 0
         self.suspects: list[dict] = []  # gaps in a wall that probably are not gaps: a drone goes to look
         self.filled: list[tuple] = []  # wall rectangles confirmed solid and filled: (axis, layer, a0, a1, b0, b1)
         self.candidates: list[Candidate] = []
@@ -275,6 +291,7 @@ class MasterController:
         self._cone = None
         self.scout_fail: dict[tuple, float] = {}
         self.link = LinkModel(self.map)
+        self.link.field.optimistic = plan_vox is not None  # plan-assisted: a lattice vertex inside a wall must not veto a whole area
         self.slots: list[dict] = []
         self.demand: dict = {}  # key -> (point, time): places that need coverage
         self.lost_events = 0
@@ -504,6 +521,7 @@ class MasterController:
         job = {"pkts": pkts, "poses": poses, "rots": rots, "want_cue": want_cue, "t": t}
         if self.core is not None:  # ~0.5 ms on the core: fuse inline, no worker thread
             self._deliver(self._fuse_rust(job), t)
+            self._person_sightings(t)
             if t - self._mesh_t >= 0.15:  # mesh what these frames just showed, straight away (bounded: it shares the thread)
                 self._mesh_t = t
                 self.surface.step(t, 64, 0.0, 4)
@@ -556,6 +574,19 @@ class MasterController:
         pos_c, rot_c = np.asarray(res["pos"]).astype(float), np.asarray(res["rot"]).astype(float)
         det = {}
         sv = np.asarray(res["surv"])
+        if self.detector is not None:
+            # People are found by the detector on the camera frames, at most twice a second per drone
+            pick = [b for b, p in enumerate(pkts) if not p.thumb and not self.drones[p.drone].grounded
+                    and p.t - self._det_t.get(p.drone, -1.0) >= 0.5]
+            if pick and not self.detector.busy and self.detector.ready:
+                frames = np.asarray(self.core.rgbs([int(pkts[b].slot) for b in pick])).reshape(len(pick), H, W, 3)
+                ctx = [{"drone": pkts[b].drone, "t": pkts[b].t, "pos": pos_c[b].copy(), "rot": rot_c[b].copy(),
+                        "depth": est[b].reshape(H, W).copy(), "rgb": frames[i].copy() if os.environ.get("DISASTER_DET_DEBUG") else None}
+                       for i, b in enumerate(pick)]
+                if self.detector.submit(ctx, frames):
+                    for b in pick:
+                        self._det_t[pkts[b].drone] = pkts[b].t
+            sv = np.zeros((0, 6))
         for b in np.unique(sv[:, 0].astype(int)) if len(sv) else []:
             sel = sv[:, 0].astype(int) == b
             det[int(b)] = (sv[sel, 1:4].astype(float), sv[sel, 4].astype(float))
@@ -646,6 +677,8 @@ class MasterController:
 
     def close(self) -> None:
         self._fuse_stop.set()
+        if self.detector is not None:
+            self.detector.close()
         if self.smoother is not None:
             self.smoother.close()
         self.surface.close()
@@ -714,6 +747,75 @@ class MasterController:
             self._release(r)
             self._event(t, f"Drone {r.id} lost (crash)", "error")
 
+    def on_vitals(self, drone: int, cand: int, reading: dict, t: float) -> None:
+        """A vitals reading (Presage, simulated) for survivor `cand`, taken by `drone`: score how urgently they need help,
+        and let the drone go if it is still holding on them."""
+        r = self.drones[drone]
+        c = self.candidates[cand]
+        c.vitals = reading
+        c.urgency, c.tier = triage(reading["hr"], reading["rr"], reading["confidence"])
+        c.t_assessed = t
+        self._event(t, f"Survivor #{c.id}: heart rate {reading['hr']}, breathing {reading['rr']}/min "
+                       f"(confidence {reading['confidence']:.0%}) -> {c.tier}, urgency {c.urgency}/100 [simulated Presage]",
+                    "error" if c.tier == "IMMEDIATE" else "warn" if c.tier == "URGENT" else "success")
+        if r.mode == INVESTIGATE and r.candidate == cand:
+            self._release(r)
+            self._set_mode(r, EXPLORE if self._inside(r.pos) else WAIT, t)
+            r.path, r.task = [], None
+
+    def triage_list(self) -> list[dict]:
+        """Confirmed survivors, most urgent first (those not yet assessed last)."""
+        rows = [c for c in self.candidates if c.confirmed]
+        rows.sort(key=lambda c: (c.vitals is None, -c.urgency, c.id))
+        return [c.to_dict() for c in rows]
+
+    def _person_sightings(self, t: float) -> None:
+        """Turn the detector's boxes into survivor sightings: the person's position is where the box's middle looks, at
+        the frame's own depth there."""
+        if self.detector is None:
+            return
+        H, W = self.cfg.cam_h, self.cfg.cam_w
+        rays = self.map.k.body_rays
+        for ctx_list, dets_list in self.detector.poll():
+            for ctx, dets in zip(ctx_list, dets_list):
+                for x1, y1, x2, y2, conf, cls in dets:
+                    if int(cls) != PERSON or conf < 0.45:
+                        continue
+                    w, h = x2 - x1, y2 - y1
+                    if w < 10 or h < 10:
+                        continue  # a few pixels: too far to be sure
+                    xa, ya = int(x1 + 0.3 * w), int(y1 + 0.3 * h)
+                    patch = ctx["depth"][ya:max(int(y2 - 0.3 * h), ya + 1), xa:max(int(x2 - 0.3 * w), xa + 1)]
+                    valid = patch[patch > 0]
+                    if len(valid) < 3:
+                        continue
+                    d = float(np.median(valid))
+                    if d > 10.0:
+                        continue  # the detector is reliable within a few metres; a far "person" is a wall or a window
+                    # Is the box the size of a person? Camera focal lengths in pixels (square pixels).
+                    fx = (W / 2) / np.tan(np.deg2rad(self.cfg.cam_hfov_deg) / 2)
+                    fy = (H / 2) / np.tan(np.deg2rad(self.cfg.cam_vfov_deg) / 2)
+                    w_m, h_m = w * d / fx, h * d / fy
+                    if not (0.2 <= w_m <= 2.3 and 0.2 <= h_m <= 2.3):
+                        continue  # a wall strip or a window frame, not a body
+                    # the middle of the box is the body (the corners are whatever is behind it): one compact thing, not a
+                    # surface receding into the distance
+                    if np.percentile(valid, 90) - np.percentile(valid, 10) > 1.2:
+                        continue
+                    col, row = int(np.clip((x1 + x2) / 2, 0, W - 1)), int(np.clip((y1 + y2) / 2, 0, H - 1))
+                    pt = ctx["pos"] + ctx["rot"] @ rays[row * W + col] * d
+                    if ctx.get("rgb") is not None and self._dbg_n < 120:
+                        from PIL import Image, ImageDraw
+                        self._dbg_n += 1
+                        im = Image.fromarray(ctx["rgb"]); dr = ImageDraw.Draw(im)
+                        dr.rectangle([x1, y1, x2, y2], outline=(0, 255, 0))
+                        os.makedirs(os.path.expanduser("~/det/live"), exist_ok=True)
+                        im.save(os.path.expanduser(f"~/det/live/{self._dbg_n:03d}_c{conf:.2f}_d{d:.1f}_p{pt[0]:.0f}_{pt[1]:.0f}_{pt[2]:.0f}.png"))
+                    if self.env_known and not (self.x0 + 1.0 < pt[0] < self.x1 - 1.0 and self.y0 + 1.0 < pt[1] < self.y1 - 1.0
+                                               and 0.0 < pt[2] < self.top):
+                        continue  # survivors are inside the building (not on its outer wall), whose outline the master has been given
+                    self._associate(pt, d, ctx["drone"], t)
+
     def _associate(self, p: np.ndarray, rng: float, drone: int, t: float) -> None:
         for c in self.candidates:
             if np.linalg.norm(c.pos - p) < ASSOC_RADIUS:
@@ -733,7 +835,8 @@ class MasterController:
         self.tick += 1
         self.t_now = t
         self._smooth()
-        self.link.refresh(self.interior)
+        # plan-assisted: the building is known, so unexplored interior is not assumed to eat the signal
+        self.link.refresh(self.interior if self.plan_air is None else np.zeros_like(self.interior))
         self.link.update_coverage(self._nodes_plan, t)
         self._build_nav(t)
         self._update_envelope(t)
@@ -1152,7 +1255,14 @@ class MasterController:
                     self._step_gap(r, t)
                 elif r.mode == INVESTIGATE:
                     c = self.candidates[r.candidate]
-                    if c.confirmed or t - c.assigned_t > INVESTIGATE_TIMEOUT:
+                    if c.confirmed and c.vitals is None and c.vitals_tries < 2:
+                        c.vitals_t0 = c.vitals_t0 or t   # confirmed: hold in front of them for a vitals reading
+                        if t - c.vitals_t0 > VITALS_TIMEOUT:
+                            c.vitals_tries, c.vitals_t0 = c.vitals_tries + 1, None
+                            self._release(r)
+                            self._set_mode(r, EXPLORE, t)
+                            r.path, r.task = [], None
+                    elif c.confirmed or t - c.assigned_t > INVESTIGATE_TIMEOUT:
                         if not c.confirmed:
                             c.attempts += 1
                             if c.attempts >= 2:
@@ -1953,7 +2063,7 @@ class MasterController:
             return self._view_point(v + 0.5, n, v + np.round(n).astype(int), dists=(2.5, 2.0, 3.0, 3.5))
         return self._view_point(v + 0.5, n, v + np.round(n).astype(int), dists=(3.0, 2.5, 3.5, 2.0, 1.5))
 
-    def _view_point(self, target: np.ndarray, normal: np.ndarray, sight_cell, dists):
+    def _view_point(self, target: np.ndarray, normal: np.ndarray, sight_cell, dists, lifts=(0.0,)):
         """A free point from which `target` (facing `normal`) is inside the camera's field of
         view, with a clear sight line to `sight_cell`. Walls are viewed head-on; floors and
         ceilings from the side, offset so their elevation stays within the vertical FOV."""
@@ -1965,10 +2075,11 @@ class MasterController:
                 cands.append(target + nh * d)
         tan_v = np.tan(self.half_vfov)
         sz = np.sign(normal[2]) if abs(normal[2]) > 0.3 else 0.0
-        for d in dists:
-            dz = sz * min(1.5, d * tan_v * 0.9)
-            for ang in np.linspace(0, 2 * np.pi, 8, endpoint=False):
-                cands.append(target + np.array([np.cos(ang) * d, np.sin(ang) * d, dz]))
+        for lift in lifts:   # (a spot may need to be a little higher: routes keep clear of the floor)
+            for d in dists:
+                dz = sz * min(1.5, d * tan_v * 0.9)
+                for ang in np.linspace(0, 2 * np.pi, 8, endpoint=False):
+                    cands.append(target + np.array([np.cos(ang) * d, np.sin(ang) * d, dz + lift]))
         sight = np.asarray(sight_cell, dtype=float)
         for c in cands:
             cell = np.floor(c)
@@ -2014,6 +2125,7 @@ class MasterController:
             cost[k] = np.linalg.norm(vox - r.pos, axis=1) + 15.0 * fl - 3.0 * np.sqrt(gain) + vpen
         rows, cols = linear_sum_assignment(cost)
         plans = 0
+        why = {"novantage": 0, "uncovered": 0, "noroute": 0, "assigned": 0}
         for k, j in sorted(zip(rows, cols), key=lambda kj: cost[kj]):
             if plans >= MAX_PLANS_PER_TICK:
                 break  # bound A* work per tick; the rest get targets next tick
@@ -2021,16 +2133,22 @@ class MasterController:
             vt = self._vantage(g)
             if vt is None:
                 self.unreachable[g["tile"]] = t + 20.0
+                why["novantage"] += 1
                 continue
             vantage, yaw = vt
             if not self._covered(vantage):
                 self._need(("vant", g["tile"]), vantage, t)  # a relay first, then the look
+                why["uncovered"] += 1
                 continue
             plans += 1
             if not self._fly_to(r, vantage, yaw):
                 self.unreachable[g["tile"]] = t + 20.0
+                why["noroute"] += 1
                 continue
+            why["assigned"] += 1
             r.task, r.task_vantage, r.arrived_t = g["tile"], np.asarray(vantage), None
+        if os.environ.get("DISASTER_ALLOC_DEBUG") and self.tick % 10 == 0:
+            print(f"[alloc] t={t:.0f} idle={len(idle)} avail={len(avail)} targets={len(self.targets)} {why}", flush=True)
 
     def _fly_to(self, r: DroneRecord, goal, yaw) -> bool:
         cells = self.nav.astar(np.floor(r.pos), np.floor(goal))
@@ -2114,25 +2232,46 @@ class MasterController:
         return out
 
     def _dispatch_investigations(self, t: float) -> None:
+        if os.environ.get("DISASTER_VITALS_DEBUG") and self.tick % 10 == 0:
+            av = [(r.id, r.mode) for r in self.drones if r.mode in (EXPLORE, WAIT) and not self.lost(r, t) and not r.grounded
+                  and (r.mode == EXPLORE or self._inside(r.pos)) and r.soc > 0.3]
+            for c in self.candidates:
+                if c.confirmed:
+                    print(f"[dispatch] t={t:.0f} cand {c.id} at {np.round(c.pos, 1)}: assigned={c.assigned} dismissed={c.dismissed} "
+                          f"vitals={c.vitals is not None} tries={c.vitals_tries} view_fails={c.view_fails} retry_in={max(0.0, c.retry_t - t):.0f} "
+                          f"available={av}", flush=True)
         for c in self.candidates:
-            if c.confirmed or c.dismissed or c.assigned is not None:
+            if (c.dismissed and not c.confirmed) or c.assigned is not None or t < c.retry_t \
+                    or (c.confirmed and (c.vitals is not None or c.vitals_tries >= 2 or c.view_fails >= 6)):
                 continue
-            avail = [r for r in self.drones if r.mode == EXPLORE and not self.lost(r, t)]
+            avail = [r for r in self.drones if r.mode in (EXPLORE, WAIT) and not self.lost(r, t) and not r.grounded
+                     and (r.mode == EXPLORE or self._inside(r.pos)) and r.soc > 0.3]
             if not avail:
                 return
-            r = min(avail, key=lambda r: np.linalg.norm(r.pos - c.pos))
+            order = sorted(avail, key=lambda r: np.linalg.norm(r.pos - c.pos))
             vt = None
             for k in range(2):  # survivors lie on floors: view from the side, a little above
-                vt = self._view_point(c.pos + [0, 0, 0.2], np.array([0.0, 0.0, 1.0]),
-                                      np.floor(c.pos + [0, 0, 0.6]), dists=(3.0, 3.5, 2.5, 4.0))
+                if c.confirmed:   # a vitals look: level with them, a few metres off, high enough to fly
+                    vt = self._view_point(c.pos + [0, 0, 0.2], np.zeros(3), np.floor(c.pos + [0, 0, 0.6]),
+                                          dists=(2.5, 3.0, 3.5, 4.5), lifts=(0.0, 0.6, 1.0, 1.5))
+                else:
+                    vt = self._view_point(c.pos + [0, 0, 0.2], np.array([0.0, 0.0, 1.0]),
+                                          np.floor(c.pos + [0, 0, 0.6]), dists=(3.0, 3.5, 2.5, 4.0))
                 if vt is not None:
                     break
             if vt is None:
-                c.attempts += 1
-                c.dismissed = c.attempts >= 3
+                if c.confirmed:  # a confirmed survivor is never written off: try again from another spot a little later
+                    c.view_fails += 1
+                    c.retry_t = t + 15.0
+                else:
+                    c.attempts += 1
+                    c.dismissed = c.attempts >= 3
                 continue
             vantage, yaw = vt
-            if not self._fly_to(r, vantage, yaw):
+            r = next((d for d in order[:4] if self._fly_to(d, vantage, yaw)), None)   # the nearest drone that has a route
+            if r is None:
+                c.view_fails += 1
+                c.retry_t = t + 10.0
                 continue
             r.task, r.task_vantage = None, None
             c.assigned, c.assigned_t = r.id, t

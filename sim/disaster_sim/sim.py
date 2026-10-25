@@ -2,6 +2,7 @@
 central node (perception, planning, piloting)."""
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 
@@ -14,6 +15,7 @@ from .camera import RGBDCamera
 from .rustcore import RustCamera, make_core
 from .config import SimConfig
 from .control import FlightController
+from .presage import SimulatedPresage
 from .esp import EspFleet
 from .master import MasterController
 from .packets import ImuPacket
@@ -28,6 +30,49 @@ FRAME_BUFFER = 160  # frames a drone can hold onboard while its link is down (~4
 class Simulation:
     def __init__(self, cfg: SimConfig | None = None):
         self.reset(cfg or SimConfig())
+
+    def _vitals_step(self, dt: float) -> None:
+        """The vitals sensor: a drone that has confirmed a survivor and holds steady a few metres from them, camera on them,
+        gets a Presage (simulated) reading after a few seconds. The sensor looks at the real person in front of the camera;
+        the master only receives the reading."""
+        f, now = self.fleet, self.t
+        while self._vitals_out and self._vitals_out[0][0] <= now:
+            _, drone, cand, reading = self._vitals_out.pop(0)
+            self.master.on_vitals(drone, cand, reading, now)
+        for r in self.master.drones:
+            c = self.master.candidates[r.candidate] if (r.mode == "investigate" and r.candidate is not None) else None
+            if c is None or not c.confirmed or c.vitals is not None or f.crashed[r.id]:
+                self._dwell.pop(r.id, None)
+                self._announced.discard(r.id)
+                continue
+            Rb = f.rot[r.id]
+            hfov, vfov = np.deg2rad(self.cfg.cam_hfov_deg) / 2, np.deg2rad(self.cfg.cam_vfov_deg) / 2
+            best = None
+            for sv in self.b.survivors:
+                d = np.array([sv.x + 0.5, sv.y + 0.5, sv.z + 0.9]) - f.pos[r.id]
+                dist = float(np.linalg.norm(d))
+                db = Rb.T @ d   # the person in the camera's own frame: in view if inside its field of view
+                if dist <= 5.0 and db[0] > 0.3 and abs(np.arctan2(db[1], db[0])) < 0.85 * hfov \
+                        and abs(np.arctan2(db[2], np.hypot(db[0], db[1]))) < 0.85 * vfov and (best is None or dist < best[1]):
+                    best = (sv, dist)
+            speed = float(np.linalg.norm(f.vel[r.id]))
+            if os.environ.get("DISASTER_VITALS_DEBUG") and int(now * 2) % 10 == 0:
+                near = min(((float(np.linalg.norm(np.array([sv.x + .5, sv.y + .5, sv.z + .9]) - f.pos[r.id])), sv.id) for sv in self.b.survivors))
+                print(f"[vitals] t={now:.0f} drone {r.id} cand {c.id}: nearest true survivor #{near[1]} at {near[0]:.1f} m, in view: "
+                      f"{best is not None}, speed {speed:.2f}, dwell {self._dwell.get(r.id, 0.0):.1f}", flush=True)
+            if best is None or speed > 0.8:
+                self._dwell[r.id] = max(0.0, self._dwell.get(r.id, 0.0) - dt)   # a blip does not throw away the hold
+                continue
+            if self._dwell.get(r.id, 0.0) <= 0.0 and r.id not in self._announced:
+                self._announced.add(r.id)
+                self.master._event(now, f"Drone {r.id} holding on survivor #{c.id}: requesting a vitals reading "
+                                        f"({SimulatedPresage.name})", "info")
+            self._dwell[r.id] = self._dwell.get(r.id, 0.0) + dt
+            if self._dwell[r.id] >= 6.0:
+                reading = self.presage.measure(best[0].health, best[1], self._dwell[r.id])
+                self._vitals_out.append((now + 0.4 + float(self.rng.uniform(0, 0.4)), r.id, c.id, reading))  # the API round trip
+                self._vitals_out.sort(key=lambda x: x[0])
+                self._dwell[r.id] = -1e9  # one reading per hold
 
     def reset(self, cfg: SimConfig | None = None) -> None:
         if cfg is not None:
@@ -48,6 +93,10 @@ class Simulation:
         self.fleet = QuadrotorFleet(n, start, yaw=np.zeros(n), battery_wh=cfg.battery_wh)
         self.fc = FlightController(n, max_speed=cfg.max_speed)
         self.esp = EspFleet(n, self.rng)
+        self.presage = SimulatedPresage(np.random.default_rng(cfg.seed + 3000))
+        self._dwell: dict[int, float] = {}  # seconds each drone has held a survivor in front of the camera
+        self._announced: set = set()
+        self._vitals_out: list = []  # readings on their way back (a fake API round trip)
         self.core = make_core(self.b, cfg) if rustcore.AVAILABLE else None
         self.camera = RustCamera(self.core, self.b, cfg, self.rng) if self.core is not None else RGBDCamera(self.b, cfg, self.rng)
         self.radio = Radio(self.b, cfg, self.rng, self.core)
@@ -137,6 +186,11 @@ class Simulation:
             t0 = time.perf_counter()
             cmds = self.master.control(self.t)
             self._tick("control", t0)
+            try:
+                self._vitals_step(1.0 / cfg.telemetry_hz)
+            except Exception:
+                import traceback
+                traceback.print_exc()
             for drone, cmd in cmds:
                 self.radio.send_down(self.t, drone, cmd, cmd.nbytes)
 

@@ -74,6 +74,7 @@ struct Core {
     rays: CudaSlice<f32>,
     steps: CudaSlice<f32>,
     colors: CudaSlice<f32>,
+    hsph: CudaSlice<f32>, nsph: i32, hprim: CudaSlice<f32>, pers_tmp: CudaSlice<u8>, fpers: CudaSlice<u8>,   // people drawn by the camera kernel
     fdepth: CudaSlice<f32>,
     frgb: CudaSlice<u8>,
     free: Vec<u32>,
@@ -190,7 +191,7 @@ impl Core {
             rays: s.clone_htod(&vec2(&rays)).map_err(err)?,
             steps: s.clone_htod(&steps_v).map_err(err)?,
             colors: s.clone_htod(&vec2(&colors)).map_err(err)?,
-            fdepth: z!(s, f32, slots * n_pix),
+            fdepth: z!(s, f32, slots * n_pix), pers_tmp: z!(s, u8, MAX_BATCH * n_pix), fpers: z!(s, u8, slots * n_pix),
             frgb: z!(s, u8, slots * n_pix * 3),
             free: (0..slots as u32).rev().collect(),
             depth_tmp: z!(s, f32, MAX_BATCH * n_pix),
@@ -219,7 +220,7 @@ impl Core {
             pos_c: z!(s, f32, MAX_BATCH * 3), rot_c: z!(s, f32, MAX_BATCH * 9), ares: z!(s, f32, MAX_BATCH * 24),
             clear: z!(s, f32, MAX_BATCH), surv: z!(s, f32, SURV_CAP * 6), surv_n: z!(s, i32, 1), cone: None, ncone: 0,
             interior: z!(s, u8, nv), per_mat: z!(s, f32, 16), nmat: colors.shape()[0] as i32,
-            td, lm: z!(s, f32, 8 * 8), nlm: 0, ts_s: z!(s, f32, tn), ts_w: z!(s, f32, tn), ts_sc: z!(s, f32, tn * 3), ts_wc: z!(s, f32, tn),
+            td, hsph: z!(s, f32, 6), nsph: 0, hprim: z!(s, f32, 10), lm: z!(s, f32, 8 * 8), nlm: 0, ts_s: z!(s, f32, tn), ts_w: z!(s, f32, tn), ts_sc: z!(s, f32, tn * 3), ts_wc: z!(s, f32, tn),
             ts_dirty: z!(s, u8, (td.ncx * td.ncy * td.ncz) as usize),
             m_field: z!(s, f32, CHP * CHP * CHP), m_obs: z!(s, u8, CHP * CHP * CHP), m_used: z!(s, u8, NSLOTS),
             m_vid: z!(s, i32, NSLOTS), m_bsum: z!(s, i32, NSLOTS / 1024 + 2), m_tri: z!(s, i32, MAX_TRI * 3),
@@ -278,6 +279,7 @@ impl Core {
                 .arg(&self.rays).arg(&self.steps).arg(&self.nsteps).arg(&self.step).arg(&self.colors)
                 .arg(&d_pos).arg(&d_rot).arg(&mi).arg(&ni)
                 .arg(&mut self.depth_tmp).arg(&mut self.rgb_tmp)
+                .arg(&self.hsph).arg(&self.nsph).arg(&self.hprim).arg(&mut self.pers_tmp)
                 .launch(cfg(m * self.n)).map_err(err)?;
         }
         let px_per_rad = self.w as f32 / (self.hfov_deg.to_radians());
@@ -297,6 +299,9 @@ impl Core {
             let src = self.depth_tmp.slice(j * self.n..(j + 1) * self.n);
             let mut dst = self.fdepth.slice_mut(slot as usize * self.n..(slot as usize + 1) * self.n);
             s.memcpy_dtod(&src, &mut dst).map_err(err)?;
+            let psrc = self.pers_tmp.slice(j * self.n..(j + 1) * self.n);
+            let mut pdst = self.fpers.slice_mut(slot as usize * self.n..(slot as usize + 1) * self.n);
+            s.memcpy_dtod(&psrc, &mut pdst).map_err(err)?;
         }
         Ok(slots)
     }
@@ -433,7 +438,7 @@ impl Core {
             let scap = SURV_CAP as i32;
             s.launch_builder(&self.k["k_hit"])
                 .arg(&dims).arg(&bi).arg(&self.pos_c).arg(&self.rot_c).arg(&self.est).arg(&d_slots).arg(&self.frgb).arg(&d_t)
-                .arg(&self.rays).arg(&self.q_params[0]).arg(&self.q_params[1]).arg(&self.q_params[2])
+                .arg(&self.rays).arg(&self.q_params[0]).arg(&self.q_params[1]).arg(&self.q_params[2]).arg(&self.fpers)
                 .arg(&mut self.hstamp).arg(&mut self.delta).arg(&mut self.hitfr).arg(&mut self.csum).arg(&mut self.cnt)
                 .arg(&mut self.qb).arg(&mut self.seenb).arg(&mut self.sidebits).arg(&mut self.tmaxb)
                 .arg(&fid0).arg(&mut self.surv).arg(&mut self.surv_n).arg(&scap)
@@ -734,6 +739,17 @@ impl Core {
             self.nopen = n as i32;
             self.mark_all_dirty()?;
         }
+        Ok(())
+    }
+
+    /// The people in the building: capsules (ax, ay, az, bx, by, bz, radius, r, g, b), and for each person a bounding
+    /// sphere (cx, cy, cz, R, first capsule, count). The camera draws them in front of the voxel world.
+    fn set_humans(&mut self, prims: PyReadonlyArray2<f32>, spheres: PyReadonlyArray2<f32>) -> R<()> {
+        let p: Vec<f32> = prims.as_array().iter().copied().collect();
+        let s: Vec<f32> = spheres.as_array().iter().copied().collect();
+        self.nsph = spheres.shape()[0] as i32;
+        self.hprim = self.stream.clone_htod(&if p.is_empty() { vec![0.0f32; 10] } else { p }).map_err(err)?;
+        self.hsph = self.stream.clone_htod(&if s.is_empty() { vec![0.0f32; 6] } else { s }).map_err(err)?;
         Ok(())
     }
 

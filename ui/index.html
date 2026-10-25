@@ -25,6 +25,10 @@
           <span><i style="background:#3ddc97;border-radius:50%"></i>survivor</span>
         </div>
       </section>
+      <section id="view-plan" class="view">
+        <div id="plan-tabs"></div>
+        <canvas id="plan-canvas"></canvas>
+      </section>
       <div id="cut-label"></div>
       <div id="demo-badge" style="display:none">SIMULATION · plan-assisted demo render: the building plan is given; geometry is revealed where the swarm has scanned</div>
     </main>
@@ -39,7 +43,7 @@
         <span id="status-mission" class="paused">CONNECTING</span>
       </div>
       <div id="view-switch">
-        <button data-view="real">Real</button><button data-view="split" class="on">Split</button><button data-view="map">Map</button>
+        <button data-view="real">Real</button><button data-view="split" class="on">Split</button><button data-view="map">Map</button><button data-view="plan">Plan</button>
       </div>
       <div class="metrics">
         <div class="metric"><label>Mission</label><span id="m-time">00:00</span></div>
@@ -71,6 +75,13 @@
         <table id="fleet">
           <thead><tr><th>ID</th><th>Mode</th><th>Battery</th><th class="num">Mbps</th><th class="num" title="VIO position error (m)">Drift</th></tr></thead>
           <tbody id="fleet-body"></tbody>
+        </table>
+      </section>
+      <section class="panel" id="triage-panel">
+        <h2>Triage <span class="tag">Presage vitals · simulated</span></h2>
+        <table id="triage">
+          <thead><tr><th>#</th><th>Floor</th><th class="num">HR</th><th class="num">Breath</th><th>Urgency</th></tr></thead>
+          <tbody id="triage-body"><tr><td colspan="5" class="dim">no survivors found yet</td></tr></tbody>
         </table>
       </section>
       <section class="panel">

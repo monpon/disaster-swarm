@@ -7,6 +7,37 @@ __device__ __forceinline__ int mat_at(const unsigned char* world, int wx, int wy
     return (int)world[(ix * wy + iy) * wz + iz];
 }
 
+// ---- people: capsule figures (see humans.py). A ray hits the nearest capsule of any person within reach.
+__device__ float cap_hit(float rx, float ry, float rz, float dx, float dy, float dz,
+                         float ax, float ay, float az, float bx, float by, float bz, float ra, float* n)
+{
+    float bax = bx-ax, bay = by-ay, baz = bz-az, oax = rx-ax, oay = ry-ay, oaz = rz-az;
+    float baba = bax*bax + bay*bay + baz*baz;
+    float bard = bax*dx + bay*dy + baz*dz, baoa = bax*oax + bay*oay + baz*oaz;
+    float rdoa = dx*oax + dy*oay + dz*oaz, oaoa = oax*oax + oay*oay + oaz*oaz;
+    float a = baba - bard*bard;
+    float b = baba*rdoa - baoa*bard;
+    float c = baba*oaoa - baoa*baoa - ra*ra*baba;
+    float h = b*b - a*c;
+    float t = -1.0f;
+    if (h >= 0.0f && fabsf(a) > 1e-9f) {
+        float tt = (-b - sqrtf(h)) / a;
+        float y = baoa + tt*bard;
+        if (y > 0.0f && y < baba) t = tt;
+        else {
+            float cx = y <= 0.0f ? oax : rx-bx, cy = y <= 0.0f ? oay : ry-by, cz = y <= 0.0f ? oaz : rz-bz;
+            float b2 = dx*cx + dy*cy + dz*cz, c2 = cx*cx + cy*cy + cz*cz - ra*ra, h2 = b2*b2 - c2;
+            if (h2 > 0.0f) t = -b2 - sqrtf(h2);
+        }
+    }
+    if (t > 0.0f) {
+        float px = rx + dx*t - ax, py = ry + dy*t - ay, pz = rz + dz*t - az;
+        float k = fminf(fmaxf((px*bax + py*bay + pz*baz) / baba, 0.0f), 1.0f);
+        n[0] = (px - bax*k) / ra; n[1] = (py - bay*k) / ra; n[2] = (pz - baz*k) / ra;
+    }
+    return t;
+}
+
 extern "C" __global__ void render(
     const unsigned char* __restrict__ world, int wx, int wy, int wz, int pad,
     const float* __restrict__ rays,      // (N,3) body-frame unit rays
@@ -16,7 +47,10 @@ extern "C" __global__ void render(
     const float* __restrict__ rots,      // (M,9) row-major
     int M, int N,
     float* __restrict__ depth_out,       // (M,N) metres, 0 = no return
-    float* __restrict__ rgb_out)         // (M,N,3) floats, before degradation
+    float* __restrict__ rgb_out,         // (M,N,3) floats, before degradation
+    const float* __restrict__ hsph, int nsph,    // people: bounding spheres (cx, cy, cz, R, first primitive, count)
+    const float* __restrict__ hprim,             // people: capsules (ax, ay, az, bx, by, bz, r, red, green, blue)
+    unsigned char* __restrict__ pers_out)        // (M,N) 1 where the nearest thing is a person (the thermal / person-sensor stand-in)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= M * N) return;
@@ -35,33 +69,57 @@ extern "C" __global__ void render(
     }
     bool hit = first >= 0;
     float* rgb = rgb_out + (long long)idx * 3;
-    if (!hit) {
-        depth_out[idx] = 0.0f;
-        rgb[0] = 18.0f; rgb[1] = 22.0f; rgb[2] = 30.0f;
-        return;
+    float depth = 1e30f, out[3] = {18.0f, 22.0f, 30.0f};
+    if (hit) {
+        depth = steps[first];
+        float hx = px + dx*depth, hy = py + dy*depth, hz = pz + dz*depth;
+        int hit_mat = mat_at(world, wx, wy, wz, pad, hx, hy, hz);
+        // refine: if the half-step before the hit is already solid, the surface is closer
+        float bd = depth - step * 0.5f;
+        if (mat_at(world, wx, wy, wz, pad, px + dx*bd, py + dy*bd, pz + dz*bd) != 0) depth = bd;
+        // which voxel face did the ray cross (for shading)
+        float pd = steps[first > 0 ? first - 1 : 0]; if (pd < 0.0f) pd = 0.0f;
+        int cx = (int)floorf(hx), cy = (int)floorf(hy), cz = (int)floorf(hz);
+        int qx = (int)floorf(px + dx*pd), qy = (int)floorf(py + dy*pd), qz = (int)floorf(pz + dz*pd);
+        float c0 = fabsf((float)(cx - qx)), c1 = fabsf((float)(cy - qy)), c2 = fabsf((float)(cz - qz));
+        float ax = fabsf(dx), ay = fabsf(dy), az = fabsf(dz);
+        int axis;
+        if (c0 + c1 + c2 > 0.0f) {
+            float v0 = c0*ax, v1 = c1*ay, v2 = c2*az;
+            axis = 0; float best = v0; if (v1 > best) { axis = 1; best = v1; } if (v2 > best) { axis = 2; }
+        } else {
+            axis = 0; float best = ax; if (ay > best) { axis = 1; best = ay; } if (az > best) { axis = 2; }
+        }
+        float facing = axis == 0 ? ax : (axis == 1 ? ay : az);
+        float shade = 0.8f + 0.2f * facing + ((axis == 2 && dz < 0.0f) ? 0.05f : 0.0f);
+        out[0] = colors[hit_mat*3] * shade; out[1] = colors[hit_mat*3+1] * shade; out[2] = colors[hit_mat*3+2] * shade;
     }
-    float depth = steps[first];
-    float hx = px + dx*depth, hy = py + dy*depth, hz = pz + dz*depth;
-    int hit_mat = mat_at(world, wx, wy, wz, pad, hx, hy, hz);
-    // refine: if the half-step before the hit is already solid, the surface is closer
-    float bd = depth - step * 0.5f;
-    if (mat_at(world, wx, wy, wz, pad, px + dx*bd, py + dy*bd, pz + dz*bd) != 0) depth = bd;
-    // which voxel face did the ray cross (for shading)
-    float pd = steps[first > 0 ? first - 1 : 0]; if (pd < 0.0f) pd = 0.0f;
-    int cx = (int)floorf(hx), cy = (int)floorf(hy), cz = (int)floorf(hz);
-    int qx = (int)floorf(px + dx*pd), qy = (int)floorf(py + dy*pd), qz = (int)floorf(pz + dz*pd);
-    float c0 = fabsf((float)(cx - qx)), c1 = fabsf((float)(cy - qy)), c2 = fabsf((float)(cz - qz));
-    float ax = fabsf(dx), ay = fabsf(dy), az = fabsf(dz);
-    int axis;
-    if (c0 + c1 + c2 > 0.0f) {
-        float v0 = c0*ax, v1 = c1*ay, v2 = c2*az;
-        axis = 0; float best = v0; if (v1 > best) { axis = 1; best = v1; } if (v2 > best) { axis = 2; }
-    } else {
-        axis = 0; float best = ax; if (ay > best) { axis = 1; best = ay; } if (az > best) { axis = 2; }
+    // people in front of whatever the ray found
+    float limit = hit ? depth : 100.0f;
+    bool person = false;
+    for (int s = 0; s < nsph; s++) {
+        const float* S = hsph + s * 6;
+        float ox = px - S[0], oy = py - S[1], oz = pz - S[2];
+        float b = ox*dx + oy*dy + oz*dz, c = ox*ox + oy*oy + oz*oz - S[3]*S[3];
+        float disc = b*b - c;
+        if (disc < 0.0f || -b - sqrtf(disc) > limit) continue;
+        int p0 = (int)S[4], pn = (int)S[5];
+        for (int k = 0; k < pn; k++) {
+            const float* Pm = hprim + (p0 + k) * 10;
+            float nrm[3];
+            float t = cap_hit(px, py, pz, dx, dy, dz, Pm[0], Pm[1], Pm[2], Pm[3], Pm[4], Pm[5], Pm[6], nrm);
+            if (t > 0.05f && t < limit) {
+                limit = t; depth = t; hit = true; person = true;
+                // soft daylight from above and the side, plus an ambient floor, so the figure reads as a rounded body
+                float l = nrm[0] * 0.35f + nrm[1] * 0.25f + nrm[2] * 0.90f;
+                float shade = 0.55f + 0.45f * fmaxf(l / 1.0f, 0.0f);
+                out[0] = Pm[7] * shade; out[1] = Pm[8] * shade; out[2] = Pm[9] * shade;
+            }
+        }
     }
-    float facing = axis == 0 ? ax : (axis == 1 ? ay : az);
-    float shade = 0.8f + 0.2f * facing + ((axis == 2 && dz < 0.0f) ? 0.05f : 0.0f);
-    rgb[0] = colors[hit_mat*3] * shade; rgb[1] = colors[hit_mat*3+1] * shade; rgb[2] = colors[hit_mat*3+2] * shade;
+    pers_out[idx] = person ? 1 : 0;
+    if (!hit) { depth_out[idx] = 0.0f; rgb[0] = out[0]; rgb[1] = out[1]; rgb[2] = out[2]; return; }
+    rgb[0] = out[0]; rgb[1] = out[1]; rgb[2] = out[2];
     depth_out[idx] = depth < 0.05f ? 0.05f : depth;
 }
 

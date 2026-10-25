@@ -1,9 +1,11 @@
 import "./style.css";
 import * as THREE from "three";
 import { SimSocket } from "./net";
+import { DbNet } from "./db/dbnet";
 import { createStage, type Stage } from "./scene/setup";
 import { RealView } from "./scene/realview";
 import { MapView } from "./scene/mapview";
+import { PlanView } from "./scene/planview";
 import { SwarmView } from "./scene/drones";
 import { CommsLayer } from "./scene/comms";
 import { CameraRig } from "./ui/camera";
@@ -32,6 +34,7 @@ map.renderer.shadowMap.enabled = false;
 
 const realView = new RealView();
 const mapView = new MapView();
+const planView = new PlanView();
 
 /** Surface any failure on the page and report it to the server log. */
 function report(text: string): void {
@@ -78,9 +81,19 @@ const pending: (StateMessage | SnapshotMessage)[] = [];
 const telemetry = new Telemetry((id) => rig.follow(id));
 const chart = new MissionChart(document.getElementById("chart")!);
 const feed = new FeedPanel();
-const net = new SimSocket(onMessage, (ok) => telemetry.connection(ok));
-net.onOpen = () => net.select(swarmReal.selected);
-const panel = new ControlPanel(net, {
+// Data source: SpacetimeDB when the server publishes into it (it says so at /config), else the simulator's websocket.
+// `?source=ws` or `?source=db` overrides.
+const qs = new URLSearchParams(location.search);
+const source = qs.get("source") ?? (await fetch("/config").then((r) => r.json()).then((c) => c.source as string).catch(() => "ws"));
+const dbSource = source === "db";
+const net = dbSource ? null : new SimSocket((m) => onMessage(m), (ok) => telemetry.connection(ok));
+if (net) net.onOpen = () => net.select(swarmReal.selected);
+const dbNet = dbSource
+  ? new DbNet((m) => onMessage(m), (ok) => telemetry.connection(ok),
+              qs.get("stdb") ?? `ws://${location.hostname}:3000`, qs.get("db") ?? "swarm")
+  : null;
+const ctl = (dbNet ?? net)!;
+const panel = new ControlPanel(ctl, {
   onView: applyView,
   onOverview: () => {
     active = real;
@@ -91,7 +104,7 @@ const rig = new CameraRig(real, [swarmReal, swarmMap], (id) => {
   active = real;
   telemetry.renderCard(id);
   feed.select(id);
-  net.select(id);
+  ctl.select(id);
 }, [map]);
 feed.select(null);
 
@@ -122,6 +135,7 @@ function applyView(v: ViewSettings): void {
     b.classList.toggle("on", b.dataset.view === v.view),
   );
   cut = cutHeight(v);
+  planView.visible = v.view === "plan";
   const planes = Number.isFinite(cut) ? [new THREE.Plane(new THREE.Vector3(0, 0, -1), cut)] : [];
   realView.layer?.setClip(planes);
   mapView.setClip(planes);
@@ -148,6 +162,29 @@ function applyView(v: ViewSettings): void {
   document.getElementById("legend-stale")!.textContent = `${v.staleAfter}s`;
 }
 
+let triageKey = "";
+
+/** Confirmed survivors, most urgent first, with their (simulated) Presage vitals. */
+function renderTriage(cands: Candidate[]): void {
+  const rows = cands.filter((c) => c.confirmed).sort((a, b) => ((b.urgency ?? -1) - (a.urgency ?? -1)) || a.id - b.id);
+  const key = JSON.stringify(rows.map((c) => [c.id, c.urgency, c.tier, c.vitals?.hr, c.vitals?.rr]));
+  if (key === triageKey) return;
+  triageKey = key;
+  const body = document.getElementById("triage-body")!;
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="5" class="dim">no survivors found yet</td></tr>';
+    return;
+  }
+  const story = building?.story ?? 4;
+  body.innerHTML = rows.map((c) => {
+    const tier = c.tier || "PENDING";
+    const label = c.tier ? `${c.tier} ${c.urgency}` : "scanning…";
+    return `<tr><td>#${c.id}</td><td>F${Math.floor(c.pos[2] / story) + 1}</td>` +
+      `<td class="num">${c.vitals ? c.vitals.hr : "–"}</td><td class="num">${c.vitals ? c.vitals.rr.toFixed(0) : "–"}</td>` +
+      `<td><span class="tier ${tier}">${label}</span></td></tr>`;
+  }).join("");
+}
+
 function applyState(msg: StateMessage | SnapshotMessage): void {
   swarmReal.sync(msg.drones);
   // The map view shows where the master believes each drone is (its VIO estimate).
@@ -157,7 +194,10 @@ function applyState(msg: StateMessage | SnapshotMessage): void {
   if (msg.seen) mapView.applySeen(msg.seen);
   drones = msg.drones;
   candidates = msg.candidates;
+  renderTriage(candidates);
+  if (msg.plan) void planView.setPlan(msg.plan);
   entries = msg.entries;
+  planView.draw(drones, entries, candidates);
   targets = msg.targets;
   mesh = msg.mesh ?? [];
   found = msg.found;
@@ -209,7 +249,13 @@ function handleState(msg: StateMessage | SnapshotMessage): void {
 }
 
 let firstWorld = true;
+let worldKey = "";
 function onMessage(msg: ServerMessage): void {
+  if (msg.type === "world") {
+    const key = `${JSON.stringify(msg.config)}|${msg.building.vox.length}`;
+    if (key === worldKey) return;   // the same mission's world, already built
+    worldKey = key;
+  }
   switch (msg.type) {
     case "world":
       pending.length = 0;
@@ -232,7 +278,7 @@ function onMessage(msg: ServerMessage): void {
   }
 }
 
-const VIEWS: ViewMode[] = ["split", "real", "map"];
+const VIEWS: ViewMode[] = ["split", "real", "map", "plan"];
 document.querySelectorAll<HTMLButtonElement>("#view-switch button").forEach((b) =>
   b.addEventListener("click", () => {
     panel.view.view = b.dataset.view as ViewMode;

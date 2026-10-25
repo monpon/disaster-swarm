@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "lil-gui": "^0.20.0",
+    "spacetimedb": "^2.13.0",
     "three": "^0.170.0",
     "uplot": "^1.6.31"
   },

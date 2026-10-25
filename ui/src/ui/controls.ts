@@ -1,10 +1,11 @@
 import GUI from "lil-gui";
-import type { SimSocket } from "../net";
+/** What the panel needs from the data source: a way to send commands (websocket or SpacetimeDB). */
+type SimSocket = { control(cmd: string, extra?: Record<string, unknown>): void };
 import type { SimConfig } from "../types";
 import type { Layers } from "../scene/drones";
 import type { ColorMode } from "../scene/mapview";
 
-export type ViewMode = "real" | "map" | "split";
+export type ViewMode = "real" | "map" | "split" | "plan";
 
 export interface ViewSettings extends Layers {
   view: ViewMode;
@@ -143,7 +144,7 @@ export class ControlPanel {
     sc.close();
 
     const vw = this.gui.addFolder("View");
-    vw.add(this.view, "view", { "Real building": "real", "Master map": "map", "Split": "split" }).name("view (Tab)").onChange(emit);
+    vw.add(this.view, "view", { "Real building": "real", "Master map": "map", "Split": "split", "Floor plan (2D, live)": "plan" }).name("view (Tab)").onChange(emit);
     this.floorCtrl = vw.add(this.view, "floor", ["all", "roof off", "F1", "F2", "F3"]).name("cutaway (F)").onChange(emit);
     vw.add(this.view, "mapColor", { "Texture (observed color)": "texture", "Scan quality": "quality", "Freshness": "freshness", "Confidence (passes / roughness)": "confidence" })
       .name("map coloring (C)")

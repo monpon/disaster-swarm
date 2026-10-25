@@ -60,13 +60,13 @@ class SimConfig:
 
     # Camera feed: monocular JPEG frames forwarded by the ESP. The master analyzes them at
     # cam_w x cam_h (the wire stream is ~320x240 JPEG of about jpeg_bytes per frame).
-    cam_w: int = 360
+    cam_w: int = 320
     cam_h: int = 240
     cam_hfov_deg: float = 90.0
-    cam_vfov_deg: float = 64.0
+    cam_vfov_deg: float = 73.74  # 4:3 at a 90 degree horizontal field of view: square pixels
     cam_range: float = 100.0  # effectively unlimited: past the far wall of any of the buildings
     cam_mount_tilt_deg: float = 0.0  # fixed camera mount, below the body's forward axis
-    jpeg_bytes: int = 14000
+    jpeg_bytes: int = 12400
 
     # Central-node perception (simulated stand-ins, see estimation.py).
     vio_drift: float = 0.05  # VIO position random walk, m per sqrt(m) flown
@@ -95,6 +95,7 @@ class SimConfig:
     # (so every drone has a perimeter leg from the first second). False: nothing, and the swarm
     # scouts the site to find it first.
     known_outline: bool = True
+    detector: bool = False  # run the person detector (object_det/, for real-world frames) instead of the sim's person sensor
     plan_assist: bool = False  # the operator also gives the building plan's openings: doors, docks, windows, hatch (demo)
     scout_alt: float = 6.0
     scout_spacing: float = 16.0

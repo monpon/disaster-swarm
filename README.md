@@ -47,3 +47,22 @@ cd sim
 Controls: click a drone (or a fleet row) to follow it, `Esc` stops following, `O` overview,
 `Space` play/pause, `0–9` jump to drone. The *Mission control* panel sets speed, scenario
 (seed, drones, wind, packet loss, camera tilt...) and view layers.
+
+## Live state through SpacetimeDB
+
+With `STDB_URL` set, the simulator publishes everything the viewer shows (drones, survivors and triage, entries, the mission log,
+the 2D floor plan, the 3D mesh, point cloud and scan freshness, and the camera feed of the drone you select) into a
+[SpacetimeDB](https://spacetimedb.com) database (module `swarm_db/`), and the viewer reads only from it, so any number of browsers
+see the same live state and play/pause/speed/reset go back through it as commands. Without `STDB_URL` the viewer uses the
+simulator's websocket as before.
+
+```bash
+scripts/stdb-up.sh            # SpacetimeDB on :3000, the swarm_db module, and the simulator publishing into it
+scripts/stdb-up.sh publish    # re-publish the module after editing swarm_db/spacetimedb/src/lib.rs
+# viewers: http://<host>:8000/      (the page asks /config where to read from; ?source=ws forces the websocket)
+```
+
+Needs the SpacetimeDB CLI (`curl -sSf https://install.spacetimedb.com | sh`) and the `wasm32-unknown-unknown` Rust target.
+Only the simulator's identity (its token is kept in `~/.swarm_stdb_token`) can write the state; viewers can only submit commands.
+`GET /stdb` shows the publisher's counters. Regenerate the viewer's bindings after changing the module:
+`spacetime generate --lang typescript --out-dir ui/src/db/bindings --module-path swarm_db/spacetimedb`.

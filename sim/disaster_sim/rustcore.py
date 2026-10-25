@@ -35,6 +35,20 @@ def make_core(building, cfg):
                         M.COLORS[1:].astype(np.float32), float(min(cfg.depth_max, cfg.cam_range)),
                         float(cfg.scan_near), float(cfg.scan_far), float(q.threshold),
                         int(min(8192, max(1024, cfg.n_drones * 170))))  # frame pool: a full onboard buffer per drone
+    # the survivors, drawn by the camera kernel as people
+    prims, spheres, first = [], [], 0
+    for sv in building.survivors:
+        P = sv.prims
+        if P is None or not len(P):
+            continue
+        pts = np.vstack([P[:, 0:3], P[:, 3:6]])
+        ctr = (pts.min(axis=0) + pts.max(axis=0)) / 2
+        rad = float(max(np.linalg.norm(P[:, 0:3] - ctr, axis=1).max(), np.linalg.norm(P[:, 3:6] - ctr, axis=1).max()) + P[:, 6].max())
+        spheres.append([*ctr, rad, first, len(P)])
+        prims.append(P)
+        first += len(P)
+    core.set_humans(np.ascontiguousarray(np.vstack(prims) if prims else np.zeros((0, 10)), dtype=np.float32),
+                    np.ascontiguousarray(np.array(spheres).reshape(-1, 6), dtype=np.float32))
     az = np.arctan2(k.body_rays[:, 1], k.body_rays[:, 0])
     el = np.arctan2(k.body_rays[:, 2], np.hypot(k.body_rays[:, 0], k.body_rays[:, 1]))
     from .radio import GLASS_DB, GROUND_DB, SLAB_DB, WALL_DB

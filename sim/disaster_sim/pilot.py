@@ -75,7 +75,7 @@ class Pilot:
             target = self.hold[i]
             self.hold_n[i] += 1
             ph = 2 * np.pi * self.hold_n[i] * 0.05 / HOLD_PERIOD   # control runs at 20 Hz
-            yaw_t = self.hold_yaw[i] + HOLD_SWEEP * np.sin(ph)
+            yaw_t = self.hold_yaw[i] + (0.0 if r.mode == "investigate" else HOLD_SWEEP * np.sin(ph))  # keep the camera on a survivor
 
         err = target - p
         v = KP_POS * err[:2]

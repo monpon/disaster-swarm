@@ -66,6 +66,7 @@ export class RealView {
   layer: VoxelLayer | null = null;
   vox: Uint8Array | null = null;
   private markers: { obj: THREE.Mesh; id: number }[] = [];
+  private people: { obj: THREE.Group; z: number }[] = [];
   private dressing: THREE.Group | null = null;
 
   async build(b: BuildingInfo): Promise<void> {
@@ -96,6 +97,24 @@ export class RealView {
     this.group.add(this.dressing);
 
     for (const s of b.survivors) {
+      if (s.prims?.length) {   // the person themself: capsules for head, torso, arms, legs
+        const fig = new THREE.Group();
+        const up = new THREE.Vector3(0, 1, 0);
+        for (const [ax, ay, az, bx, by, bz, rad, cr, cg, cb] of s.prims) {
+          const a = new THREE.Vector3(ax, ay, az), d = new THREE.Vector3(bx - ax, by - ay, bz - az);
+          const len = Math.max(d.length(), 0.001);
+          const mesh = new THREE.Mesh(
+            new THREE.CapsuleGeometry(rad, len, 4, 10),
+            new THREE.MeshStandardMaterial({ color: new THREE.Color(cr / 255, cg / 255, cb / 255), roughness: 0.85, clippingPlanes: this.layer?.clip }),
+          );
+          mesh.position.copy(a).addScaledVector(d, 0.5);
+          mesh.quaternion.setFromUnitVectors(up, d.clone().normalize());
+          mesh.castShadow = true;
+          fig.add(mesh);
+        }
+        this.group.add(fig);
+        this.people.push({ obj: fig, z: s.z });
+      }
       const ring = new THREE.Mesh(
         new THREE.RingGeometry(0.9, 1.15, 32),
         new THREE.MeshBasicMaterial({ color: "#ff3040", transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }),
@@ -108,6 +127,7 @@ export class RealView {
   }
 
   updateMarkers(found: number[], t: number, cut: number, show: boolean): void {
+    for (const p of this.people) p.obj.visible = p.z + 0.5 < cut;
     for (const { obj, id } of this.markers) {
       const isFound = found.includes(id);
       (obj.material as THREE.MeshBasicMaterial).color.set(isFound ? "#3ddc97" : "#ff3040");
@@ -130,5 +150,7 @@ export class RealView {
     }
     for (const m of this.markers) this.group.remove(m.obj);
     this.markers = [];
+    for (const p of this.people) this.group.remove(p.obj);
+    this.people = [];
   }
 }

@@ -20,6 +20,9 @@ export interface Survivor {
   x: number;
   y: number;
   z: number;
+  pose?: string;
+  /** The person's capsules: [ax, ay, az, bx, by, bz, radius, r, g, b] in world metres. */
+  prims?: number[][];
 }
 
 export interface BuildingInfo {
@@ -168,6 +171,11 @@ export interface Candidate {
   confirmed: boolean;
   dismissed: boolean;
   drone: number | null;
+  /** The (simulated) Presage reading once a drone has held on this survivor, and the triage derived from it. */
+  vitals?: { hr: number; rr: number; confidence: number; source: string } | null;
+  urgency?: number; // 0-100, -1 = not assessed
+  tier?: string; // IMMEDIATE | URGENT | DELAYED
+  t_assessed?: number;
 }
 
 export interface SimEvent {
@@ -234,6 +242,7 @@ export interface StateMessage {
   targets: [number, number, number, number][]; // x, y, z, kind (0 frontier, 1 surface)
   events: SimEvent[];
   history: HistoryPoint | null;
+  plan?: { x0: number; y0: number; w: number; h: number; story: number; floors: string[] };
   seen?: SeenDeltas;
 }
 
@@ -281,7 +290,12 @@ export function yawOf(q: [number, number, number, number]): number {
   return Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
 }
 
-export function decodeB64(b64: string): ArrayBuffer {
+/** Base64 text from the websocket, or bytes already in hand (from the database), as an ArrayBuffer. */
+export function decodeB64(b64: string | ArrayBuffer | ArrayBufferView): ArrayBuffer {
+  if (typeof b64 !== "string") {
+    if (b64 instanceof ArrayBuffer) return b64;
+    return b64.buffer.slice(b64.byteOffset, b64.byteOffset + b64.byteLength) as ArrayBuffer;
+  }
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);

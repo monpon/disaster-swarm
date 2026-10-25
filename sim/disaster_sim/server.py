@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import os
 import sys
 import threading
 import time
@@ -35,6 +36,7 @@ def dumps(payload: dict) -> str:
 class SimServer:
     def __init__(self):
         self.sim = Simulation(SimConfig())
+        self.pub_on = bool(os.environ.get("STDB_URL"))   # SpacetimeDB is on: its publisher is the only reader of the map cursors
         self.stream = make_stream(self.sim)
         self.running = True
         self.speed = 1.0
@@ -112,7 +114,7 @@ class SimServer:
 
     def snapshot(self) -> dict:
         with self.lock:
-            return state_message(self.sim, self.stream, 0, self.extra(), True, full=True)
+            return state_message(self.sim, self.stream, 0, self.extra(), True, full=True, with_map=not self.pub_on)
 
     async def send(self, ws: WebSocket, text: str) -> bool:
         try:
@@ -138,8 +140,9 @@ class SimServer:
                 with self.lock:
                     world = world_message(self.sim)
                     snap = self.snapshot()
-                    self.stream.deltas()  # advance the shared cursor past the snapshot
-                    self.stream.seen()
+                    if not self.pub_on:
+                        self.stream.deltas()  # advance the shared cursor past the snapshot
+                        self.stream.seen()
                     self.event_idx = len(self.sim.master.events)
                 await self.broadcast(world)
                 await self.broadcast(snap)
@@ -148,7 +151,7 @@ class SimServer:
                 self.broadcasts += 1
                 with self.lock:
                     msg = state_message(self.sim, self.stream, self.event_idx, self.extra(),
-                                        with_seen=self.broadcasts % SEEN_EVERY == 0)
+                                        with_seen=self.broadcasts % SEEN_EVERY == 0, with_map=not self.pub_on)
                     self.event_idx = len(self.sim.master.events)
                 await self.broadcast(msg)
             if self.clients and now - last_feed >= 1.0 / FEED_HZ:
@@ -167,6 +170,9 @@ server = SimServer()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     server.start()
+    if os.environ.get("STDB_URL"):   # serve the live state through SpacetimeDB too
+        from .stdb import StdbPublisher
+        server.pub = StdbPublisher(server, os.environ["STDB_URL"], os.environ.get("STDB_DB", "swarm"))
     task = asyncio.create_task(server.run())
     yield
     server._stop = True
@@ -194,6 +200,18 @@ async def ws_endpoint(ws: WebSocket) -> None:
         pass
     finally:
         server.clients.pop(ws, None)
+
+
+@app.get("/config")
+async def config() -> dict:
+    """Where the viewer should read its data from: SpacetimeDB when the server publishes into it."""
+    return {"source": "db" if server.pub_on else "ws"}
+
+
+@app.get("/stdb")
+async def stdb_stats() -> dict:
+    pub = getattr(server, "pub", None)
+    return pub.stats() if pub else {"enabled": False}
 
 
 @app.get("/entries")

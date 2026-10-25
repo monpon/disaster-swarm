@@ -634,3 +634,25 @@ kbd {
   z-index: 20;
   pointer-events: none;
 }
+
+#triage { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
+#triage th { text-align: left; font-weight: 500; color: var(--dim, #8a93a6); padding: 2px 4px; }
+#triage td { padding: 3px 4px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+#triage td.dim { color: var(--dim, #8a93a6); text-align: center; padding: 8px; }
+#triage .num { text-align: right; }
+#triage .tier { display: inline-block; min-width: 82px; text-align: center; padding: 1px 6px; border-radius: 999px; font-weight: 600; }
+#triage .tier.IMMEDIATE { background: rgba(255, 77, 79, 0.2); color: #ff6b6d; border: 1px solid rgba(255, 77, 79, 0.6); }
+#triage .tier.URGENT { background: rgba(255, 176, 32, 0.18); color: #ffb020; border: 1px solid rgba(255, 176, 32, 0.55); }
+#triage .tier.DELAYED { background: rgba(61, 220, 151, 0.16); color: #3ddc97; border: 1px solid rgba(61, 220, 151, 0.5); }
+#triage .tier.PENDING { background: rgba(138, 147, 166, 0.14); color: #8a93a6; border: 1px solid rgba(138, 147, 166, 0.4); }
+.panel h2 .tag { font: 500 9px var(--mono); letter-spacing: 0.06em; color: #f6e05e; margin-left: 6px; text-transform: uppercase; }
+
+/* ---------- live 2D floor plan view ---------- */
+#view-plan { display: none; background: #0b0f17; }
+#views.mode-plan #view-real, #views.mode-plan #view-map { display: none; }
+#views.mode-plan #view-plan { display: block; }
+#plan-canvas { position: absolute; inset: 0; }
+#plan-tabs { position: absolute; right: 24px; top: 84px; z-index: 4; display: flex; flex-direction: column; gap: 4px; }
+#plan-tabs button { font: 600 11px var(--mono); padding: 5px 12px; border-radius: 6px; cursor: pointer; color: #9aa3b5;
+  background: rgba(20, 26, 38, 0.85); border: 1px solid rgba(255, 255, 255, 0.12); }
+#plan-tabs button.on { color: #0b0f17; background: #5ec8ff; border-color: #5ec8ff; }

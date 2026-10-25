@@ -102,6 +102,7 @@ class CoverageField:
         self.shape = (len(self.xs), len(self.ys), len(self.zs))
         self.cache: dict[tuple, tuple] = {}  # node key -> (position, time, field)
         self.best = None  # (nx,ny,nz) numpy, max over nodes
+        self.optimistic = False  # judge a point by its best nearby lattice vertex instead of its worst
 
     def update(self, snr, nodes: list[np.ndarray], now: float, max_age: float = 3.0) -> None:
         keep, fields = {}, []
@@ -132,4 +133,5 @@ class CoverageField:
         fy = np.clip(p[1] / self.DX, 0, len(self.ys) - 1.001)
         fz = np.clip(p[2] / self.DZ, 0, len(self.zs) - 1.001)
         ix, iy, iz = int(fx), int(fy), int(fz)
-        return float(self.best[ix:ix + 2, iy:iy + 2, iz:iz + 2].min())
+        around = self.best[ix:ix + 2, iy:iy + 2, iz:iz + 2]
+        return float(around.max() if self.optimistic else around.min())
