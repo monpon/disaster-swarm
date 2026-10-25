@@ -1,7 +1,8 @@
 # Mayfly
 CalHacks 13 submission
 
-**Live site: https://disaster-swarm.vercel.app/** (the web console; it shows demo data unless it is pointed at a running simulator, see below)
+**Live site: https://sonic-magenta-5w7whpr.tmp.now/** (the web console, reading the live mission from the GX10 through a tunnel)
+**Live simulator and 3D viewer: https://clouds-msg-diversity-serial.trycloudflare.com/** (served from the GX10; only up while the sim and its tunnel are running)
 
 Mayfly is a search-and-rescue drone swarm simulator, plus the tooling to connect it to real hardware. A single central master
 computer orchestrates every drone over a lossy, delayed radio link. The drones fly into an unknown collapsed building, build a
@@ -24,8 +25,8 @@ Built with [SpacetimeDB](https://spacetimedb.com) and [Presage](https://presaget
 
 ## The web console
 
-The console is a TanStack Start app (`ui/apps/web`). The hosted copy at https://disaster-swarm.vercel.app/ runs on its demo
-data. It reads live data from a SpacetimeDB at `ws://<page host>:3000` (override with `?stdb=ws://host:3000`), so for a live
+The console is a TanStack Start app (`ui/apps/web`). The hosted copy at https://sonic-magenta-5w7whpr.tmp.now/ is built with `VITE_STDB_URL` (a `wss://` tunnel to the sim's
+SpacetimeDB) and `VITE_VIEWER_URL` (a tunnel to the sim's viewer on port 8000). Without those it falls back to demo data. It reads live data from a SpacetimeDB at `ws://<page host>:3000` (override with `?stdb=ws://host:3000`), so for a live
 mission serve it next to the sim (`scripts/console-up.sh`) or open it locally with `?stdb=` pointing at the sim's machine:
 
 ```bash
