@@ -1,8 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createFileRoute } from "@tanstack/react-router";
 
-import { hasMoss } from "@/server/mission-search";
-import { ask, hasElevenLabs, speak, transcribe, type AgentRequest } from "@/server/voice-agent";
+import { hasMoss, searchMission } from "@/server/mission-search";
+import { ask, hasElevenLabs, provider, speak, transcribe, type AgentRequest } from "@/server/voice-agent";
 
 /**
  * The voice agent's endpoint. GET says whether ElevenLabs speech is set up. POST takes a multipart form: `audio` (a
@@ -11,7 +11,10 @@ import { ask, hasElevenLabs, speak, transcribe, type AgentRequest } from "@/serv
 export const Route = createFileRoute("/api/voice")({
   server: {
     handlers: {
-      GET: () => Response.json({ elevenlabs: hasElevenLabs(), moss: hasMoss() }),
+      GET: () => {
+        void searchMission([], "warm up");   // the first Moss query loads the index (seconds); the console asks this on page load
+        return Response.json({ elevenlabs: hasElevenLabs(), moss: hasMoss(), model: provider() });
+      },
       POST: async ({ request }) => {
         try {
           const form = await request.formData();
@@ -31,8 +34,11 @@ export const Route = createFileRoute("/api/voice")({
           return Response.json({ ...reply, audio: sound });
         } catch (e) {
           console.error("voice agent:", e);
-          const status = e instanceof Anthropic.RateLimitError ? 429 : e instanceof Anthropic.AuthenticationError || /authentication method/.test(String(e)) ? 401 : 500;
-          return Response.json({ error: status === 401 ? "The voice agent has no Anthropic credentials." : "The voice agent hit an error." }, { status });
+          const status =
+            e instanceof Anthropic.RateLimitError || /\b429\b|RESOURCE_EXHAUSTED/.test(String(e)) ? 429
+            : e instanceof Anthropic.AuthenticationError || /authentication method|API key|\b40[13]\b/.test(String(e)) ? 401
+            : 500;
+          return Response.json({ error: status === 401 ? "The voice agent has no valid model credentials." : status === 429 ? "The voice agent is rate limited. Try again in a moment." : "The voice agent hit an error." }, { status });
         }
       },
     },

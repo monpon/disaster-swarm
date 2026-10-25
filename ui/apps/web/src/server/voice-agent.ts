@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI, type Content, type FunctionDeclaration } from "@google/genai";
 
 import { reviewOptions, type DetectionSettings } from "@/lib/detection";
 import { searchMission, type MissionDoc } from "./mission-search";
@@ -109,7 +110,7 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
 async function runTool(
   name: string,
   input: Record<string, unknown>,
-  work: { settings: DetectionSettings; changes: string[]; actions: MissionAction[]; docs: MissionDoc[] },
+  work: Work,
 ): Promise<string> {
   const s = work.settings;
   if (name === "search_mission") {
@@ -153,18 +154,71 @@ async function runTool(
   throw new Error(`unknown tool ${name}`);
 }
 
+/** Which model answers: Gemini when GEMINI_API_KEY is set (unless LLM_PROVIDER=claude), Claude otherwise. */
+export const provider = (): "gemini" | "claude" => (process.env.GEMINI_API_KEY && process.env.LLM_PROVIDER !== "claude" ? "gemini" : "claude");
+
+type Work = { settings: DetectionSettings; changes: string[]; actions: MissionAction[]; docs: MissionDoc[] };
+
+const newWork = (req: AgentRequest): Work => ({ settings: req.settings, changes: [], actions: [], docs: req.docs ?? [] });
+
+const prompt = (req: AgentRequest): string => {
+  const recent = req.history.length ? `<recent_conversation>\n${req.history.map((h) => `Crew: ${h.q}\nMayfly: ${h.a}`).join("\n")}\n</recent_conversation>\n\n` : "";
+  return `${recent}<console_state>\n${JSON.stringify({ detection: req.settings, ...(req.console as object) })}\n</console_state>\n\n${req.question}`;
+};
+
+const finish = (req: AgentRequest, work: Work, reply: string): Omit<AgentReply, "audio"> => ({
+  question: req.question,
+  reply,
+  settings: work.settings,
+  changes: work.changes,
+  actions: work.actions,
+});
+
+export const ask = (req: AgentRequest): Promise<Omit<AgentReply, "audio">> => (provider() === "gemini" ? askGemini(req) : askClaude(req));
+
+// ---------------------------------------------------------------- Gemini
+
+let gemini: GoogleGenAI | null = null;
+
+async function askGemini(req: AgentRequest): Promise<Omit<AgentReply, "audio">> {
+  gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const work = newWork(req);
+  const declarations: FunctionDeclaration[] = TOOLS.map((t) => ({ name: t.name, description: t.description, parametersJsonSchema: t.input_schema }));
+  const contents: Content[] = [{ role: "user", parts: [{ text: prompt(req) }] }];
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const res = await gemini.models.generateContent({
+      model: process.env.GEMINI_MODEL ?? "gemini-3.6-flash",
+      contents,
+      config: { systemInstruction: SYSTEM, tools: [{ functionDeclarations: declarations }], maxOutputTokens: 1024 },
+    });
+    const calls = res.functionCalls ?? [];
+    if (!calls.length) return finish(req, work, res.text?.trim() || (work.changes.length ? `Done: ${work.changes.join("; ")}.` : "Sorry, I didn't get an answer."));
+    // echo the model's turn back unchanged (it carries the thought signatures), then answer every call in one turn
+    contents.push(res.candidates![0].content!);
+    contents.push({
+      role: "user",
+      parts: await Promise.all(
+        calls.map(async (c) => {
+          try {
+            return { functionResponse: { name: c.name!, response: { output: await runTool(c.name!, (c.args ?? {}) as Record<string, unknown>, work) } } };
+          } catch (e) {
+            return { functionResponse: { name: c.name!, response: { error: String((e as Error).message) } } };
+          }
+        }),
+      ),
+    });
+  }
+  return finish(req, work, work.changes.length ? `Done: ${work.changes.join("; ")}.` : "Sorry, I couldn't finish that.");
+}
+
+// ---------------------------------------------------------------- Claude
+
 let client: Anthropic | null = null;
 
-export async function ask(req: AgentRequest): Promise<Omit<AgentReply, "audio">> {
+async function askClaude(req: AgentRequest): Promise<Omit<AgentReply, "audio">> {
   client ??= new Anthropic();
-  const work = { settings: req.settings, changes: [] as string[], actions: [] as MissionAction[], docs: req.docs ?? [] };
-  const recent = req.history.length ? `<recent_conversation>\n${req.history.map((h) => `Crew: ${h.q}\nMayfly: ${h.a}`).join("\n")}\n</recent_conversation>\n\n` : "";
-  const messages: Anthropic.Beta.BetaMessageParam[] = [
-    {
-      role: "user",
-      content: `${recent}<console_state>\n${JSON.stringify({ detection: req.settings, ...(req.console as object) })}\n</console_state>\n\n${req.question}`,
-    },
-  ];
+  const work = newWork(req);
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: prompt(req) }];
 
   for (let step = 0; step < MAX_STEPS; step++) {
     const res = await client.beta.messages.create({
