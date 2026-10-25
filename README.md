@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="#demo-video"><img src="docs/media/thumbnail.jpg" alt="Mayfly: a swarm of small drones that finds people faster" width="100%"></a>
+  <a href="https://vimeo.com/1239251813"><img src="docs/media/thumbnail.jpg" alt="Watch the Mayfly demo video on Vimeo" width="100%"></a>
 </p>
 
 # Mayfly
@@ -8,29 +8,56 @@
 
 When a building comes down, the first hour is mostly spent finding out what's inside. Today a rescue team typically sends one specialized indoor drone, flown by one pilot, room by room. Mayfly sends several small drones at once. They split the building between them, fly without a pilot each, and merge what they see into one live 3D map. The map marks people, blocked passages and hazards, and the crew gets a route.
 
-Built at Cal Hacks 13.0. **Live console: [disaster-swarm.vercel.app](https://disaster-swarm.vercel.app/)** (demo data unless it's pointed at a running simulator; see [Running it](#running-it)).
+Built at Cal Hacks 13.0. ▶ **[Watch the demo video (3:52)](https://vimeo.com/1239251813)**
+
+| | |
+|---|---|
+| Demo video | https://vimeo.com/1239251813 (3:52) |
+| Live web console | https://sonic-magenta-5w7whpr.tmp.now/ (reads the live mission from the GX10 through a tunnel) |
+| Live simulator + 3D viewer | https://clouds-msg-diversity-serial.trycloudflare.com/ (served from the GX10) |
+| If the live links are down | Both depend on a running sim and a tunnel, so they can be offline. The console then shows demo data. Run it yourself: [Quick start](#quick-start) |
+| Sponsors used | [SpacetimeDB](https://spacetimedb.com) (all live state), [Presage](https://presagetech.com) (vitals, see the honesty notes) |
 
 - [Demo video](#demo-video)
+- [Honesty notes](#honesty-notes-read-before-judging)
 - [Why this matters](#the-need)
 - [What it does](#the-product) and [screens](#screens)
 - [How it works](#system-architecture)
-- [What's real and what's simulated](#whats-real-and-whats-simulated)
 - [Competition](#competition) and [market](#market-fit)
 - [Hackathon tracks](#hackathon-tracks)
-- [Run it](#running-it)
+- [Quick start](#quick-start) and [repository map](#repository-map)
 - [Works cited](#works-cited)
 
 ---
 
 ## Demo video
 
-<a id="demo-video"></a>
-[![Watch the Mayfly demo](docs/media/thumbnail.jpg)](#demo-video)
-<!-- Replace #demo-video with the YouTube/Devpost link once uploaded. Source: video/ (Remotion). -->
+[![Watch the Mayfly demo on Vimeo](docs/media/thumbnail.jpg)](https://vimeo.com/1239251813)
 
-Just under 4 minutes: the problem, the product, a live walkthrough of the console, the technical design, and what's next.
+▶ **[Watch on Vimeo (3:52)](https://vimeo.com/1239251813)**: the problem, the product, a live walkthrough of the console, the technical design, and what's next. The video is a Remotion project in `video/`.
 
 ---
+
+## Honesty notes (read before judging)
+
+- Everything in the live view is a **simulation**. The simulator is the main way to run Mayfly.
+- **Vitals are simulated.** The real Presage SDK was tested only on rendered video clips with an injected pulse (`vitals/`).
+  It needs a real face and shoulders shot, so it does not run on the simulated people.
+- The **flight controller has been tested against a fake drone and has never flown the real drone.** Stick directions and RC
+  mode are unverified on hardware.
+- The real drone reaches the database only while the ESP32 relay board is attached and joined to the GX10's network.
+- The IMU path is dead reckoning from a cheap sensor. It drifts, and is a demonstration, not navigation.
+
+In more detail:
+
+| Part | Status |
+|---|---|
+| E58 video + IMU through the ESP32-S3 relay | **Working on real hardware.** Measured video from a direct link: 24.5–24.6 fps with 99.6–100% of frames intact. Through the S3 relay: 21.2 and 19.8 fps with 86.1% and 80.3% intact. The protocol splits each frame into about 7 chunks, so 5% packet loss costs about 30% of frames [8]. The real drone shows up in the console as a live tile. |
+| Flying the real drone from code | **Built, not flown.** The flight handler (`drone_control/control/`, 49 tests) has only been tested with props off. Flight commands deliberately don't go through the database, because it has no auth for them yet. |
+| Multi-drone swarm, shared map, planner | **Simulated.** Everything runs in our simulator on the GX10 with simulated VIO and a mono-depth stand-in. Plan-assisted demo mode is labelled *SIMULATION* in the viewer. |
+| Object detection | **Real model.** YOLO26m runs on frames rendered by the simulator and on the live E58 stream (`live_drone_detection.py`). |
+| Vitals | **Benchmarked.** When SmartSpectra accepts a clip, injected heart rate comes back within 0.5 bpm after about 12 s of warm-up. On our simulated *drone-quality* clips (shake, noise, JPEG q35) it returned `ChestNotVisible`. Live vitals in the sim are a labelled stand-in. |
+| Console screens | Live from SpacetimeDB for drones, survivors, map, events and feeds. Mission setup and address search are mocked. The landing page's one-vs-many race is an illustration, not a measurement. |
 
 ## The need
 
@@ -193,19 +220,6 @@ The planner does a few things a single drone can't:
 - Some drones hold back as a relay backbone to keep the mesh connected.
 - A forward-clear speed governor uses fresh depth, with an emergency brake and a battery return reserve.
 
-## What's real and what's simulated
-
-We'd rather tell you than have you find out.
-
-| Part | Status |
-|---|---|
-| E58 video + IMU through the ESP32-S3 relay | **Working on real hardware.** Measured video from a direct link: 24.5–24.6 fps with 99.6–100% of frames intact. Through the S3 relay: 21.2 and 19.8 fps with 86.1% and 80.3% intact. The protocol splits each frame into about 7 chunks, so 5% packet loss costs about 30% of frames [8]. The real drone shows up in the console as a live tile. |
-| Flying the real drone from code | **Built, not flown.** The flight handler (`drone_control/control/`, 49 tests) has only been tested with props off. Flight commands deliberately don't go through the database, because it has no auth for them yet. |
-| Multi-drone swarm, shared map, planner | **Simulated.** Everything runs in our simulator on the GX10 with simulated VIO and a mono-depth stand-in. Plan-assisted demo mode is labelled *SIMULATION* in the viewer. |
-| Object detection | **Real model.** YOLO26m runs on frames rendered by the simulator and on the live E58 stream (`live_drone_detection.py`). |
-| Vitals | **Benchmarked.** When SmartSpectra accepts a clip, injected heart rate comes back within 0.5 bpm after about 12 s of warm-up. On our simulated *drone-quality* clips (shake, noise, JPEG q35) it returned `ChestNotVisible`. Live vitals in the sim are a labelled stand-in. |
-| Console screens | Live from SpacetimeDB for drones, survivors, map, events and feeds. Mission setup and address search are mocked. The landing page's one-vs-many race is an illustration, not a measurement. |
-
 ## Competition
 
 | | Mayfly | BRINC LEMUR 2 | Flyability Elios 3 | Skydio X10 |
@@ -250,35 +264,114 @@ The incumbents make excellent single aircraft: caged airframes that bounce off w
 | **ASUS / GPU computing** | `gpucore` CUDA kernels and the YOLO26 FP16 service run on the ASUS Ascent GX10. |
 | **AI / computer vision** | YOLO26m detection of people, doors, fire and smoke; TSDF map fusion; frontier planning. |
 
-## Running it
+## Quick start
+
+Needs Python 3.11+, and for the full simulator an NVIDIA GPU with CUDA (developed on an ASUS GX10, aarch64) and a Rust toolchain.
 
 ```bash
-# Simulator + 3D viewer (Python 3.11+)
-cd sim && python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/uvicorn disaster_sim.server:app --port 8000
+# 1. simulator (Python)
+cd sim
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"      # add ".[gpu]" for the torch smoothing path
+.venv/bin/uvicorn disaster_sim.server:app --port 8000           # http://localhost:8000 serves the 3D viewer
 
-# Live state through SpacetimeDB (needs the spacetime CLI and wasm32 target)
-scripts/stdb-up.sh
+# 2. the viewer it serves (built once)
+cd ../ui/viewer && npm install && npm run build
 
-# Web console
-cd ui && bun install && bun run dev:web
+# 3. live state through SpacetimeDB (recommended): database, module, and the sim publishing into it
+cd ../.. && scripts/stdb-up.sh        # needs the SpacetimeDB CLI and the wasm32-unknown-unknown Rust target
 
-# GPU core (optional; Rust + CUDA 13 driver)
-cd gpucore && pip install maturin && maturin develop --release
-
-# Object detection on the live E58 feed
-./run_live_feed.sh
+# 4. the web console, in dev mode (http://localhost:3001/live)
+cd ui && bun install && cd apps/web && npx vite dev
+#    pointing at a sim on another machine:  http://localhost:3001/live?stdb=ws://<sim host>:3000
 ```
 
-### The web console
-
-The console is a TanStack Start app (`ui/apps/web`). The hosted copy at [disaster-swarm.vercel.app](https://disaster-swarm.vercel.app/) runs on demo data. It reads live data from SpacetimeDB at `?stdb=ws://host:3000` if given, else the build's `VITE_STDB_URL` (for example a `wss://` tunnel), else `ws://<page host>:3000`. The 3D viewer address works the same way with `?viewer=` and `VITE_VIEWER_URL`, defaulting to port 8000 on the database's host. For a live mission, serve the console next to the sim (`scripts/console-up.sh`) or run it locally pointed at the sim's machine:
+Tests and a headless run:
 
 ```bash
-cd ui && bun install && cd apps/web && npx vite dev     # http://localhost:3001/live?stdb=ws://<sim host>:3000
+cd sim && .venv/bin/python -m pytest -q
+cd sim && .venv/bin/python -m disaster_sim.headless --seconds 600 --seed 1 --drones 6
+cd drone_control && PYTHONPATH=.:tests pytest tests        # 54 tests: IMU tracker, flight handler, controller server, DB publisher
 ```
 
 More detail lives next to the code: `gpucore/README.md`, `object_det/README.md`, `vitals/README.md`, `drone_control/control/README.md`, `drone_control/esp32/README.md`. The demo video is a Remotion project in `video/`.
+
+## Repository map
+
+| Path | What is in it |
+|---|---|
+| `sim/disaster_sim/` | The simulator (Python). See the table below. |
+| `gpucore/` | Rust + CUDA core (PyO3): camera rendering, depth fusion, TSDF map, alignment, mesher, radio |
+| `object_det/` | YOLO person detector served on loopback `127.0.0.1:8765` (`serve.py`); the sim calls it |
+| `swarm_db/spacetimedb/` | SpacetimeDB module (Rust): the `entity`, `bulk`, `event` and `cmd` tables and their reducers |
+| `ui/apps/web/` | Web console: TanStack Start + React, `routes/` (landing, setup, live, fleet) and `components/live/` |
+| `ui/viewer/` | Three.js 3D viewer (Vite); also embedded in the console as the point cloud (`?embed=cloud`) |
+| `drone_control/` | Real hardware: `esp32/` relay firmware, `imu/` live page and path tracker, `control/` flight handler + HTTP API, `publish_db.py` |
+| `vitals/` | Presage experiments: sample images, rendered clips, benchmark results |
+| `scripts/` | `stdb-up.sh` (database + sim), `console-up.sh` (serve the built console) |
+
+Simulator modules (`sim/disaster_sim/`):
+
+| Area | Files |
+|---|---|
+| World and people | `building.py`, `entry.py`, `opening.py`, `materials.py`, `humans.py`, `floorplan.py` |
+| Drones | `physics.py` (quadrotor dynamics), `control.py` (cascaded PID), `pilot.py`, `esp.py` |
+| Sensing and mapping | `camera.py`, `rustcore.py` (bridge to `gpucore`), `gpu.py`, `voxelmap.py`, `surface.py`, `smoothing.py`, `align.py`, `estimation.py` |
+| Radio | `comms.py`, `radio.py`, `packets.py`, `gcomms.py` |
+| Master and planning | `master.py`, `planner3d.py` |
+| People finding | `detector.py` (YOLO client), `presage.py` (simulated vitals) |
+| Server and state | `sim.py` (the simulation loop), `server.py` (FastAPI), `protocol.py`, `stdb.py` (SpacetimeDB publisher), `config.py` |
+
+## Live state through SpacetimeDB
+
+With `STDB_URL` set, the simulator publishes everything the viewers show into a SpacetimeDB database named `swarm` (port 3000),
+and the viewer and console read only from it, so any number of browsers see the same state. Without `STDB_URL` the viewer uses
+the simulator's websocket instead (`?source=ws` forces this).
+
+- **Tables:** `entity` (key, ver, text JSON, binary data), `bulk` (voxels, points, scan freshness, meshes, camera feeds),
+  `event` (mission log) and `cmd` (commands from viewers). Reducers: `put`, `put_blobs`, `drop_keys`, `submit_cmd`, `clear_all`.
+- **Keys the console uses:** `drone/<n>`, `plan/<floor>`, `feed/jpg<n>` (15 fps JPEG camera feeds), `real/status` and
+  `feed/jpgreal` (the real drone).
+- **Writes:** only the simulator's identity (token in `~/.swarm_stdb_token`) can write state. Viewers can only submit commands.
+- **Commands:** `play`, `pause`, `speed`, `step`, `reset` and `select` (which drones' feeds to stream).
+- `GET /stdb` on the sim server returns the publisher's counters. Regenerate the viewer's bindings after editing the module:
+  `spacetime generate --lang typescript --out-dir ui/viewer/src/db/bindings --module-path swarm_db/spacetimedb`.
+- The console finds the database at `?stdb=`, else the `VITE_STDB_URL` build variable, else `ws://<page host>:3000`. The viewer
+  address works the same way (`?viewer=`, `VITE_VIEWER_URL`, else `http://<page host>:8000/`). The hosted console is built with
+  both set to Cloudflare tunnels to the GX10 (a `wss://` address is required from an HTTPS page).
+
+## Real drone
+
+`drone_control/` connects real hardware, always next to the simulator and never instead of it. The sim stays the main path.
+
+- **Link:** E58 drone Wi-Fi AP (video UDP 8080, RC UDP 8090) to an ESP32-S3 relay (`esp32/relay.py`, its own AP at `192.168.5.1`,
+  telemetry UDP 9100, IMU UDP 9101).
+- **Live page:** `drone_control/imu/live.py` (port 8766) serves the rotated video and a 3D path from the IMU. Path modes:
+  `hold` (default, slow leak) and `recentre`.
+- **Flight handler:** `python -m control` in `drone_control/` (see `drone_control/control/README.md`). Sticks are shaped and
+  slew-limited, neutral until flying, with a dead-man timeout (0.4 s neutral, then land after 3 s), a link-loss landing, and a
+  latched emergency stop. Its HTTP API needs a token and is never routed through the database.
+- **Database sync:** `drone_control/publish_db.py` is read-only toward the drone and writes `real/status` and `feed/jpgreal`.
+
+## Controls
+
+Click a drone (or a fleet row) to follow it, `Esc` stops following, `O` overview, `Space` play/pause, `0–9` jump to drone. The
+*Mission control* panel sets speed, scenario (seed, drones, wind, packet loss, camera tilt) and view layers.
+
+## Notes for AI agents and contributors
+
+- **Start here:** `sim/disaster_sim/sim.py` (loop), `master.py` (decisions), `stdb.py` (what is published),
+  `ui/apps/web/src/lib/swarm.ts` (console data store), `ui/viewer/src/main.ts` (viewer entry).
+- **The sim palette is load-bearing.** `materials.py` colours are classified by the master from camera pixels, and the doorframe
+  yellow drives entry detection. Change how things *look* only in the viewer (`ui/viewer/src/scene/textures.ts`, `realview.ts`).
+- **Detector:** `cfg.detector` is on by default and uses the loopback service on port 8765. On the GX10 the live drone page uses
+  8766 for this reason.
+- **Do not commit secrets.** The Presage API key belongs only in the gitignored `vitals/.env`.
+- **Label simulated things as simulated** in any UI text or doc. Keep the real/simulated distinction honest.
+- **Console deploy:** `ui/apps/web` builds with `NITRO_PRESET=vercel npx vite build` for Vercel. Set `VITE_STDB_URL` and
+  `VITE_VIEWER_URL` at build time (they are compiled in). From the repo root, `scripts/console-up.sh` serves the built console
+  on port 3001 from the GX10.
+- **Verify before claiming:** run the tests above after changing the sim or `drone_control`; typecheck the console with
+  `cd ui/apps/web && npx tsc --noEmit`.
 
 ## Works cited
 
@@ -302,3 +395,6 @@ More detail lives next to the code: `gpucore/README.md`, `object_det/README.md`,
 13. Grand View Research. Drone market and drone-as-first-responder market size estimates, 2026–2033 (global drones $96.4B → $182.4B; drone-as-first-responder $3.5B → $11B at 17.7% CAGR).
 
 **Media in the demo video.** Stock footage and photos are public domain or Creative Commons. Authors and licences are listed per file in `video/public/stock/CREDITS.md`. Competitor names and logos are used only to identify products.
+## Team
+
+Built at CalHacks 13.

@@ -1,7 +1,9 @@
-# Swarm demo video
+# Mayfly demo video
+
+▶ **Published version: https://vimeo.com/1239251813**
 
 Remotion project for the Cal Hacks 13.0 video. It builds Part A (problem, solution,
-research), Part B (website demo), Part C (technical section + roadmap) and Part D (closing), about 3:31 in total.
+research), Part B (website demo), Part C (technical section + roadmap) and Part D (closing), about 3:52 in total.
 
 ## Layout
 
