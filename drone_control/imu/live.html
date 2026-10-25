@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drone Live</title>
+<style>
+  :root { --bg: #111418; --panel: #1b2027; --text: #e6e9ee; --muted: #8a94a3; --ok: #3ccf8e; --warn: #f2b84b; --bad: #ff6b6b; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px system-ui, sans-serif; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto;
+         gap: 12px; height: 100%; padding: 12px; box-sizing: border-box; }
+  @media (max-width: 800px) { main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(300px, 1fr) auto; height: auto; min-height: 100%; } }
+  .card { background: var(--panel); border-radius: 8px; overflow: hidden; position: relative; min-height: 0; }
+  .label { position: absolute; top: 8px; left: 10px; color: var(--muted); font-size: 12px; z-index: 1; }
+  #videoCard { display: flex; align-items: center; justify-content: center; }
+  /* the drone sends 240x320 portrait frames; shown turned 90 degrees counter-clockwise (fitVideo sizes it to fit the card) */
+  #video { position: absolute; top: 50%; left: 50%; display: block; transform: translate(-50%, -50%) rotate(-90deg); }
+  [hidden] { display: none !important; }
+  #noVideo { color: var(--muted); }
+  #scene { width: 100%; height: 100%; display: block; }
+  footer { grid-column: 1 / -1; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; background: var(--panel);
+           border-radius: 8px; padding: 10px 12px; }
+  .stat { color: var(--muted); } .stat b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pill { padding: 2px 8px; border-radius: 99px; font-size: 12px; background: #2a313b; }
+  .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); }
+  button { background: #2a313b; color: var(--text); border: 1px solid #3a434f; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card" id="videoCard">
+    <span class="label">drone camera</span>
+    <span id="noVideo">waiting for video…</span>
+    <img id="video" alt="drone camera feed" hidden>
+  </div>
+  <div class="card">
+    <span class="label">IMU path (drag to orbit) · trail 30 s</span>
+    <canvas id="scene"></canvas>
+  </div>
+  <footer>
+    <span id="state" class="pill">connecting</span>
+    <span class="stat">video <b id="fps">0</b> fps · ok <b id="okpct">–</b>%</span>
+    <span class="stat">IMU <b id="imuhz">0</b> Hz <span id="imusrc"></span> · drops <b id="imuerr">0</b></span>
+    <span class="stat">pos <b id="pos">0, 0, 0</b> m</span>
+    <span class="spacer"></span>
+    <a href="runs.html" style="color: var(--muted)">recorded runs</a>
+    <button id="mode" title="hold: the path fades slowly (about 5 s) while the board moves and stays put at rest. recentre: the path is pulled back to the start within a second whenever the board keeps moving.">Path: hold</button>
+    <button id="zero">Re-zero path</button>
+    <button id="cal">Recalibrate (hold still 2 s)</button>
+  </footer>
+</main>
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+
+// Video: MJPEG stream; reconnect if it drops.
+function startVideo() {
+  const img = $('video');
+  img.onload = () => { img.hidden = false; $('noVideo').hidden = true; fitVideo(); };
+  img.onerror = () => setTimeout(startVideo, 2000);
+  img.src = 'video.mjpg?' + Date.now();
+}
+startVideo();
+
+// Fit the rotated video in its card: after a 90 degree turn the frame's height runs along the card's width.
+function fitVideo() {
+  const img = $('video'), card = $('videoCard');
+  const w = img.naturalWidth, h = img.naturalHeight;
+  if (!w || !h) return;
+  const s = Math.min(card.clientWidth / h, card.clientHeight / w);
+  img.style.width = w * s + 'px';
+  img.style.height = h * s + 'px';
+}
+addEventListener('resize', fitVideo);
+setInterval(fitVideo, 1000);
+
+// 3D scene: world is z-up, three.js is y-up.
+const canvas = $('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b2027);
+const world = new THREE.Group();
+world.rotation.x = -Math.PI / 2;
+scene.add(world);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.001, 100);
+camera.position.set(0.7, 0.6, 0.9);
+const controls = new THREE.OrbitControls(camera, canvas);
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+sun.position.set(1, 2, 1);
+scene.add(sun);
+const grid = new THREE.GridHelper(2, 20, 0x3a434f, 0x262d36);
+grid.rotation.x = Math.PI / 2;
+world.add(grid);
+world.add(new THREE.AxesHelper(0.15));
+const board = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.03, 0.008), new THREE.MeshStandardMaterial({ color: 0x2f9e6e }));
+board.add(new THREE.AxesHelper(0.05));
+world.add(board);
+
+const MAX = 30 * 30;   // 30 s at 30 updates/s
+const trailPos = new Float32Array(MAX * 3), trailCol = new Float32Array(MAX * 3);
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3));
+trailGeo.setAttribute('color', new THREE.BufferAttribute(trailCol, 3));
+// WebGL lines are 1 px wide, so the trail is drawn as fat points.
+world.add(new THREE.Points(trailGeo, new THREE.PointsMaterial({ vertexColors: true, size: 5, sizeAttenuation: false })));
+let trailN = 0;
+function pushTrail(p, still) {
+  if (trailN === MAX) {
+    trailPos.copyWithin(0, 3); trailCol.copyWithin(0, 3); trailN--;
+  }
+  trailPos.set(p, trailN * 3);
+  trailCol.set(still ? [0.95, 0.72, 0.29] : [0.3, 0.76, 1], trailN * 3);
+  trailN++;
+  trailGeo.setDrawRange(0, trailN);
+  trailGeo.attributes.position.needsUpdate = trailGeo.attributes.color.needsUpdate = true;
+}
+
+function resize() {
+  const r = canvas.parentElement.getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / r.height;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(canvas.parentElement);
+
+// State stream.
+const events = new EventSource('events');
+events.onmessage = (e) => {
+  const s = JSON.parse(e.data);
+  const st = $('state');
+  if (s.imu_hz === 0) { st.textContent = 'no IMU data'; st.className = 'pill bad'; }
+  else if (s.calibrating) { st.textContent = 'calibrating: hold still'; st.className = 'pill warn'; }
+  else {
+    st.textContent = s.still ? 'tracking · still' : s.relative ? (s.mode === 'recentre' ? 'recentring (pause to anchor)' : 'moving without a pause (path fading slowly)') : 'tracking · moving';
+    st.className = s.relative ? 'pill warn' : 'pill ok';
+  }
+  if (s.mode) {
+    mode = s.mode;
+    $('mode').textContent = 'Path: ' + s.mode;
+  }
+  $('fps').textContent = s.video_fps;
+  $('okpct').textContent = s.video.ok_pct ?? '–';
+  $('imuhz').textContent = s.imu_hz;
+  $('imusrc').textContent = s.imu_source ? `(${s.imu_source})` : '';
+  $('imuerr').textContent = s.imu_errors;
+  $('pos').textContent = s.p.map((v) => v.toFixed(2)).join(', ');
+  if (!s.calibrating && s.imu_hz > 0) {
+    board.position.set(...s.p);
+    board.quaternion.set(s.q[1], s.q[2], s.q[3], s.q[0]);
+    pushTrail(s.p, s.still);
+  }
+};
+events.onerror = () => { $('state').textContent = 'server offline'; $('state').className = 'pill bad'; };
+
+let mode = 'hold';
+$('mode').onclick = () => fetch('mode/' + (mode === 'hold' ? 'recentre' : 'hold'), { method: 'POST' });
+$('zero').onclick = () => { fetch('zero', { method: 'POST' }); trailN = 0; trailGeo.setDrawRange(0, 0); };
+$('cal').onclick = () => { fetch('calibrate', { method: 'POST' }); trailN = 0; trailGeo.setDrawRange(0, 0); };
+
+(function tick() {
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

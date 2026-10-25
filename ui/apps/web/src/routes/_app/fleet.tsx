@@ -9,7 +9,8 @@ import { Select } from "@/components/form";
 import { Quad } from "@/components/icons";
 import { ConsoleBody } from "@/components/shell/console-body";
 import { TopBar } from "@/components/shell/top-bar";
-import { fleet, type Drone } from "@/lib/mock";
+import { useConsole } from "@/lib/console";
+import type { Drone } from "@/lib/mock";
 
 export const Route = createFileRoute("/_app/fleet")({
   head: () => ({ meta: [{ title: "Fleet" }] }),
@@ -26,6 +27,7 @@ const statusStyle: Record<Drone["status"], { dot: string; text: string; label: s
 function FleetPage() {
   const [selected, setSelected] = useState("D4");
   const [query, setQuery] = useState("");
+  const fleet = useConsole().fleet;
   const drone = fleet.find((d) => d.id === selected) ?? fleet[0]!;
   const rows = fleet.filter((d) => `${d.id} ${d.airframe}`.toLowerCase().includes(query.toLowerCase()));
 

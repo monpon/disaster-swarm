@@ -6,31 +6,39 @@ import { ChevronDown, ChevronUp, Megaphone } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { CrewChannel } from "@/components/live/crew-channel";
-import { FeedStrip } from "@/components/live/feed-strip";
+import { FeedStrip, FocusedFeed } from "@/components/live/feed-strip";
 import { FindingsPanel } from "@/components/live/findings-panel";
 import { ScanMap } from "@/components/live/scan-map";
 import { Timeline } from "@/components/live/timeline";
 import { ConsoleBody } from "@/components/shell/console-body";
 import { TopBar } from "@/components/shell/top-bar";
-import { mission, missionTypeKey } from "@/lib/mock";
+import { useConsole } from "@/lib/console";
+import { mission as demoMission, missionTypeKey } from "@/lib/mock";
+import { store } from "@/lib/swarm";
 import { usePaneCollapse } from "@/lib/use-pane-collapse";
 
 export const Route = createFileRoute("/_app/live")({
-  head: () => ({ meta: [{ title: `Live: ${mission.address}` }] }),
+  head: () => ({ meta: [{ title: `Live: ${demoMission.address}` }] }),
   component: LivePage,
 });
 
 type SwarmMode = "explore" | "hold" | "return";
 
 function LivePage() {
+  const c = useConsole();
+  const mission = c.mission;
   const [mode, setMode] = useState<SwarmMode>("explore");
+  const changeMode = (m: SwarmMode) => {
+    setMode(m);
+    if (c.live) store.command(m === "explore" ? "play" : "pause");
+  };
   const [drone, setDrone] = useState("D2");
+  const [focus, setFocus] = useState<string | null>(null);
   const [finding, setFinding] = useState<string | null>("p1");
-  const [missionType, setMissionType] = useState(mission.type);
-  useEffect(() => {
-    const picked = sessionStorage.getItem(missionTypeKey);
-    if (picked) setMissionType(picked);
-  }, []);
+  // The demo mission shows the type picked on the new-mission page; a live mission keeps its own.
+  const [pickedType, setPickedType] = useState<string | null>(null);
+  useEffect(() => setPickedType(sessionStorage.getItem(missionTypeKey)), []);
+  const missionType = !c.live && pickedType ? pickedType : mission.type;
   const feeds = usePaneCollapse();
   const crew = usePaneCollapse();
 
@@ -41,7 +49,7 @@ function LivePage() {
           <>
             <Segmented
               value={mode}
-              onChange={setMode}
+              onChange={changeMode}
               className="p-[3px]"
               options={[
                 {
@@ -81,12 +89,16 @@ function LivePage() {
               <ResizablePanel defaultSize="78%" minSize="35%">
                 <div className="flex h-full flex-col">
                   <div className="min-h-0 flex-1">
-                    <ScanMap
-                      selectedDrone={drone}
-                      onSelectDrone={setDrone}
-                      selectedFinding={finding}
-                      onSelectFinding={setFinding}
-                    />
+                    {focus ? (
+                      <FocusedFeed id={focus} onBack={() => setFocus(null)} />
+                    ) : (
+                      <ScanMap
+                        selectedDrone={drone}
+                        onSelectDrone={setDrone}
+                        selectedFinding={finding}
+                        onSelectFinding={setFinding}
+                      />
+                    )}
                   </div>
                   <Timeline />
                 </div>
@@ -104,7 +116,7 @@ function LivePage() {
                 <div className="flex h-full flex-col bg-panel">
                   <div className="flex h-[34px] shrink-0 items-center gap-2 border-b border-line pr-1.5 pl-3">
                     <span className="text-[13px] font-semibold">Feeds</span>
-                    <span className="text-xs text-muted">4 live, mono 15 fps</span>
+                    <span className="text-xs text-muted">{c.live ? "all drones, scroll sideways (streams the visible ones)" : "4 live, mono 15 fps"}</span>
                     <div className="flex-1" />
                     <Button variant="ghost" size="icon" className="size-7" onClick={feeds.toggle} aria-label={feeds.collapsed ? "Expand feeds" : "Collapse feeds"}>
                       {feeds.collapsed ? <ChevronUp /> : <ChevronDown />}
@@ -112,7 +124,17 @@ function LivePage() {
                   </div>
                   {!feeds.collapsed && (
                     <div className="min-h-0 flex-1">
-                      <FeedStrip selected={drone} onSelect={setDrone} />
+                      <FeedStrip
+                        selected={drone}
+                        onSelect={(id) => {
+                          setDrone(id);
+                          if (focus) setFocus(id);
+                        }}
+                        onFocus={(id) => {
+                          if (id !== "REAL") setDrone(id);
+                          setFocus(id);
+                        }}
+                      />
                     </div>
                   )}
                 </div>

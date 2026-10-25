@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Disaster Swarm</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <main id="views" class="mode-split">
+      <section id="view-real" class="view">
+        <div class="view-tag"><b>REAL BUILDING</b><span>ground truth · drones in flight</span></div>
+      </section>
+      <section id="view-map" class="view">
+        <div class="view-tag map"><b>MASTER MAP</b><span>drones at estimated pose ·</span><span id="map-stats">point cloud from camera feeds</span></div>
+        <div class="legend">
+          <span data-mode="texture"><i class="grad tex"></i>points back-projected from depth pixels, in the color the camera saw</span>
+          <span data-mode="quality"><i class="grad qual"></i>scan quality: far → proper (≤ 8 m) → close</span>
+          <span data-mode="confidence"><i class="grad qual"></i>confidence: one pass or rough surface → several passes and flat</span>
+          <span data-mode="freshness"><i class="grad fresh"></i>last proper scan: now → <b id="legend-stale">120s</b> <i style="background:#3a4152"></i>never</span>
+          <span><i style="background:#ffb020;border-radius:50%"></i>frontier</span>
+          <span><i style="background:#5ec8ff;border-radius:50%"></i>unscanned surface</span>
+          <span><i style="background:#f6e05e"></i>entry</span>
+          <span><i style="background:#3ddc97;border-radius:50%"></i>survivor</span>
+        </div>
+      </section>
+      <section id="view-plan" class="view">
+        <div id="plan-tabs"></div>
+        <canvas id="plan-canvas"></canvas>
+      </section>
+      <div id="cut-label"></div>
+      <div id="demo-badge" style="display:none">SIMULATION · plan-assisted demo render: the building plan is given; geometry is revealed where the swarm has scanned</div>
+    </main>
+
+    <header id="hud">
+      <div class="brand">
+        <span id="conn" class="conn down"></span>
+        <div>
+          <h1>DISASTER SWARM</h1>
+          <p>Indoor search &amp; rescue · central master</p>
+        </div>
+        <span id="status-mission" class="paused">CONNECTING</span>
+      </div>
+      <div id="view-switch">
+        <button data-view="real">Real</button><button data-view="split" class="on">Split</button><button data-view="map">Map</button><button data-view="plan">Plan</button>
+      </div>
+      <div class="metrics">
+        <div class="metric"><label>Mission</label><span id="m-time">00:00</span></div>
+        <div class="metric wide"><label>Phase</label><span id="m-phase">-</span></div>
+        <div class="metric"><label>Entries</label><span id="m-entries">0</span></div>
+        <div class="metric"><label>Explored</label><span id="m-explored">0%</span></div>
+        <div class="metric"><label>Scanned</label><span id="m-scanned">0%</span></div>
+        <div class="metric accent"><label>Survivors</label><span id="m-found">0/0</span></div>
+        <div class="metric"><label>Airborne</label><span id="m-air">0</span></div>
+        <div class="metric"><label>Relays / posts</label><span id="m-relays">0</span></div>
+        <div class="metric"><label>Contact losses</label><span id="m-losses" title="times a drone lost contact">0</span></div>
+        <div class="metric"><label>Lost</label><span id="m-lost">0</span></div>
+        <div class="metric"><label>VIO drift</label><span id="m-drift">-</span></div>
+        <div class="metric"><label>Re-scanned</label><span id="m-verified">-</span></div>
+        <div class="metric"><label>Map aligned</label><span id="m-align">-</span></div>
+        <div class="metric"><label>Map error</label><span id="m-error" title="RMS distance to the true surface: running average → smoothed (scoring only)">-</span></div>
+        <div class="metric"><label>Smoother</label><span id="m-smoother">-</span></div>
+        <div class="metric wide"><label>Uplink</label><span id="m-link">-</span></div>
+        <div class="metric wide"><label>Sim rate</label><span id="m-rtf">-</span></div>
+        <div class="metric wide meter"><label>CPU</label><span id="m-cpu">-</span></div>
+        <div class="metric wide meter"><label>Memory</label><span id="m-mem">-</span></div>
+        <div class="metric wide meter"><label>GPU</label><span id="m-gpu">-</span></div>
+      </div>
+    </header>
+
+    <aside id="left" class="panel-stack">
+      <section class="panel">
+        <h2>Fleet</h2>
+        <table id="fleet">
+          <thead><tr><th>ID</th><th>Mode</th><th>Battery</th><th class="num">Mbps</th><th class="num" title="VIO position error (m)">Drift</th></tr></thead>
+          <tbody id="fleet-body"></tbody>
+        </table>
+      </section>
+      <section class="panel" id="triage-panel">
+        <h2>Triage <span class="tag">Presage vitals · simulated</span></h2>
+        <table id="triage">
+          <thead><tr><th>#</th><th>Floor</th><th class="num">HR</th><th class="num">Breath</th><th>Urgency</th></tr></thead>
+          <tbody id="triage-body"><tr><td colspan="5" class="dim">no survivors found yet</td></tr></tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <h2>Mission progress</h2>
+        <div id="chart"></div>
+      </section>
+    </aside>
+
+    <aside id="right" class="panel-stack">
+      <section class="panel"><div id="drone-card" class="empty"></div></section>
+      <section id="feed-panel" class="panel empty">
+        <h2 id="feed-title">Camera feed</h2>
+        <div class="feed-row"><canvas id="feed-rgb"></canvas><canvas id="feed-depth"></canvas></div>
+        <div id="feed-info">select a drone</div>
+      </section>
+      <section class="panel grow">
+        <h2>Master event log</h2>
+        <ul id="events"></ul>
+      </section>
+    </aside>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
